@@ -6,9 +6,7 @@ if TYPE_CHECKING:
 
 
 class ProxyBalancerServer(ThreadingHTTPServer):
-    """Многопоточный HTTP сервер для прокси-балансировщика"""
-
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.proxy_balancer = None
+        self.proxy_balancer: Optional["ProxyBalancer"] = None
         self.allow_reuse_address = True
