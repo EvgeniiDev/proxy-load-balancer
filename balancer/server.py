@@ -1,5 +1,5 @@
 from http.server import ThreadingHTTPServer
-from typing import Optional, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from .balancer import ProxyBalancer
@@ -7,7 +7,7 @@ if TYPE_CHECKING:
 
 class ProxyBalancerServer(ThreadingHTTPServer):
     """Многопоточный HTTP сервер для прокси-балансировщика"""
-    
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.proxy_balancer = None

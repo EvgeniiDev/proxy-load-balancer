@@ -1,16 +1,18 @@
+import random
 import threading
 import time
-import random
-from typing import List, Dict, Optional, Any
+from typing import Any, Dict, List, Optional
+
 import requests
-from .server import ProxyBalancerServer
+
 from .handler import ProxyHandler
+from .server import ProxyBalancerServer
 from .utils import ProxyManager
 
 
 class ProxyBalancer:
     """Основной класс прокси-балансировщика"""
-    
+
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.available_proxies = []
@@ -31,10 +33,10 @@ class ProxyBalancer:
     def stop(self) -> None:
         """Остановка балансировщика"""
         self.stop_event.set()
-        
+
         if self.health_thread:
             self.health_thread.join(timeout=5)
-            
+
         if self.server:
             self.server.shutdown()
             self.server.server_close()
@@ -42,14 +44,16 @@ class ProxyBalancer:
         for session in self.sessions.values():
             try:
                 session.close()
-            except:
-                pass    def _init_proxies(self) -> None:
+            except BaseException:
+                pass def _init_proxies(self) -> None:
         """Инициализация прокси серверов"""
         for proxy_config in self.config['proxies']:
-            proxy = {'host': proxy_config['host'], 'port': proxy_config['port']}
+            proxy = {
+                'host': proxy_config['host'],
+                'port': proxy_config['port']}
             session = self._create_session(proxy)
             self.sessions[ProxyManager.get_proxy_key(proxy)] = session
-            
+
             if self._test_proxy(session):
                 self.available_proxies.append(proxy)
             else:
@@ -66,13 +70,15 @@ class ProxyBalancer:
 
     def _test_proxy(self, session: requests.Session) -> bool:
         """Тестирование работоспособности прокси"""
-        test_urls: List[str] = ['http://httpbin.org/ip', 'http://icanhazip.com']
+        test_urls: List[str] = [
+            'http://httpbin.org/ip',
+            'http://icanhazip.com']
         for url in test_urls:
             try:
                 response: requests.Response = session.get(url, timeout=10)
                 if response.status_code == 200:
                     return True
-            except:
+            except BaseException:
                 continue
         return False
 
@@ -80,17 +86,19 @@ class ProxyBalancer:
         """Запуск HTTP сервера"""
         server_config: Dict[str, Any] = self.config['server']
         self.server = ProxyBalancerServer(
-            (server_config['host'], server_config['port']), 
+            (server_config['host'], server_config['port']),
             ProxyHandler
         )
         self.server.proxy_balancer = self
-        
-        server_thread: threading.Thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+        server_thread: threading.Thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True)
         server_thread.start()
 
     def _start_health_checker(self) -> None:
         """Запуск проверки здоровья прокси"""
-        self.health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
+        self.health_thread = threading.Thread(
+            target=self._health_check_loop, daemon=True)
         self.health_thread.start()
 
     def _health_check_loop(self) -> None:
@@ -104,27 +112,30 @@ class ProxyBalancer:
         """Проверка недоступных прокси на восстановление"""
         if not self.unavailable_proxies:
             return
-            
+
         for proxy in self.unavailable_proxies[:2]:
             if self.stop_event.is_set():
                 break
-                
-            session: requests.Session = self.sessions[ProxyManager.get_proxy_key(proxy)]
+
+            session: requests.Session = self.sessions[ProxyManager.get_proxy_key(
+                proxy)]
             if self._test_proxy(session):
                 with self.lock:
                     if proxy in self.unavailable_proxies:
                         self.unavailable_proxies.remove(proxy)
                         self.available_proxies.append(proxy)
-                        self.failure_counts[ProxyManager.get_proxy_key(proxy)] = 0
+                        self.failure_counts[ProxyManager.get_proxy_key(
+                            proxy)] = 0
 
     def _check_available_proxies(self) -> None:
         """Проверка доступных прокси на работоспособность"""
         if not self.available_proxies:
             return
-            
+
         proxy: Dict[str, Any] = random.choice(self.available_proxies)
-        session: requests.Session = self.sessions[ProxyManager.get_proxy_key(proxy)]
-        
+        session: requests.Session = self.sessions[ProxyManager.get_proxy_key(
+            proxy)]
+
         if not self._test_proxy(session):
             with self.lock:
                 if proxy in self.available_proxies:
@@ -152,7 +163,7 @@ class ProxyBalancer:
         """Отметка неудачного использования прокси"""
         key: str = ProxyManager.get_proxy_key(proxy)
         self.failure_counts[key] = self.failure_counts.get(key, 0) + 1
-        
+
         if self.failure_counts[key] >= self.config['max_retries']:
             with self.lock:
                 if proxy in self.available_proxies:

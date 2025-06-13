@@ -1,7 +1,8 @@
-import socket
 import select
+import socket
 from http.server import BaseHTTPRequestHandler
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
 import socks
 
 
@@ -31,7 +32,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_request(self) -> None:
         """Обработка стандартных HTTP запросов"""
-        balancer = getattr(self.server, 'proxy_balancer', None)
+        balancer = getattr(self.server, "proxy_balancer", None)
         if not balancer:
             self._send_error(503, "Service unavailable")
             return
@@ -42,14 +43,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            content_length: int = int(self.headers.get('Content-Length', 0))
-            body: bytes = self.rfile.read(
-                content_length) if content_length > 0 else b''
+            content_length: int = int(self.headers.get("Content-Length", 0))
+            body: bytes = self.rfile.read(content_length) if content_length > 0 else b""
 
             headers: Dict[str, str] = dict(self.headers)
-            headers.pop('Host', None)
-            headers.pop('Connection', None)
-            headers.pop('Proxy-Connection', None)
+            headers.pop("Host", None)
+            headers.pop("Connection", None)
+            headers.pop("Proxy-Connection", None)
 
             url: str = self._build_url()
             session = balancer.get_session(proxy)
@@ -59,16 +59,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 url=url,
                 headers=headers,
                 data=body,
-                timeout=balancer.config['connection_timeout'],
+                timeout=balancer.config["connection_timeout"],
                 allow_redirects=False,
-                verify=False
+                verify=False,
             )
 
             balancer.mark_success(proxy)
 
             self.send_response(response.status_code)
             for header, value in response.headers.items():
-                if header.lower() not in ['connection', 'transfer-encoding']:
+                if header.lower() not in ["connection", "transfer-encoding"]:
                     self.send_header(header, value)
             self.end_headers()
 
@@ -81,22 +81,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _build_url(self) -> str:
         """Построение целевого URL из запроса"""
-        if self.path.startswith('http'):
+        if self.path.startswith("http"):
             return self.path
 
-        host: str = self.headers.get('Host', '')
-        if ':' in host:
-            host, port_str = host.split(':', 1)
+        host: str = self.headers.get("Host", "")
+        if ":" in host:
+            host, port_str = host.split(":", 1)
             port: int = int(port_str)
         else:
             port = 80
 
-        scheme: str = 'https' if port == 443 else 'http'
-        return f"{scheme}://{host}:{port}{self.path}" if port not in [80, 443] else f"{scheme}://{host}{self.path}"
+        scheme: str = "https" if port == 443 else "http"
+        return (
+            f"{scheme}://{host}:{port}{self.path}"
+            if port not in [80, 443]
+            else f"{scheme}://{host}{self.path}"
+        )
 
     def _handle_connect(self) -> None:
         """Обработка CONNECT запросов для HTTPS туннелирования"""
-        balancer = getattr(self.server, 'proxy_balancer', None)
+        balancer = getattr(self.server, "proxy_balancer", None)
         if not balancer:
             self._send_error(503, "Service unavailable")
             return
@@ -107,18 +111,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         host_port: str = self.path
-        if ':' in host_port:
-            host, port_str = host_port.rsplit(':', 1)
+        if ":" in host_port:
+            host, port_str = host_port.rsplit(":", 1)
             port: int = int(port_str)
         else:
             host = host_port
             port = 443
 
         try:
-            proxy_socket: socket.socket = self._create_proxy_socket(
-                proxy, host, port)
+            proxy_socket: socket.socket = self._create_proxy_socket(proxy, host, port)
 
-            self.send_response(200, 'Connection Established')
+            self.send_response(200, "Connection Established")
             self.end_headers()
 
             balancer.mark_success(proxy)
@@ -128,23 +131,31 @@ class ProxyHandler(BaseHTTPRequestHandler):
             balancer.mark_failure(proxy)
             self._send_error(502, "Tunnel failed")
 
-    def _create_proxy_socket(self, proxy: Dict[str, Any], target_host: str, target_port: int) -> socket.socket:
+    def _create_proxy_socket(
+        self, proxy: Dict[str, Any], target_host: str, target_port: int
+    ) -> socket.socket:
         """Создание SOCKS5 соединения через прокси"""
         sock: socket.socket = socks.socksocket()
-        sock.set_proxy(socks.SOCKS5, proxy['host'], proxy['port'])
+        sock.set_proxy(socks.SOCKS5, proxy["host"], proxy["port"])
         sock.settimeout(30)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.connect((target_host, target_port))
         return sock
 
-    def _tunnel_data(self, client_socket: socket.socket, proxy_socket: socket.socket) -> None:
+    def _tunnel_data(
+        self, client_socket: socket.socket, proxy_socket: socket.socket
+    ) -> None:
         """Туннелирование данных между клиентом и прокси"""
         try:
             proxy_socket.settimeout(30)
 
             while True:
-                ready, _, error = select.select([client_socket, proxy_socket], [],
-                                                [client_socket, proxy_socket], 1.0)
+                ready, _, error = select.select(
+                    [client_socket, proxy_socket],
+                    [],
+                    [client_socket, proxy_socket],
+                    1.0,
+                )
 
                 if error:
                     break
@@ -158,7 +169,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         if not data:
                             break
                         proxy_socket.sendall(data)
-                    except:
+                    except BaseException:
                         break
 
                 if proxy_socket in ready:
@@ -167,23 +178,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         if not data:
                             break
                         client_socket.sendall(data)
-                    except:
+                    except BaseException:
                         break
 
         finally:
             try:
                 proxy_socket.close()
-            except:
+            except BaseException:
                 pass
 
     def _send_error(self, code: int, message: str) -> None:
         """Отправка ошибки клиенту"""
         try:
             self.send_response(code)
-            self.send_header('Content-Type', 'text/plain')
+            self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(message.encode())
-        except:
+        except BaseException:
             pass
 
     def log_message(self, format: str, *args: Any) -> None:
