@@ -54,6 +54,79 @@ class ProxyBalancer:
             except Exception:
                 pass
 
+    def update_proxies(self, new_config: Dict[str, Any]) -> None:
+        """Обновить список прокси на основе новой конфигурации"""
+        with self.lock:
+            # Сохраняем старые конфигурации для сравнения
+            old_proxies = {ProxyManager.get_proxy_key(p): p for p in (
+                self.available_proxies + self.unavailable_proxies)}
+            new_proxies = {ProxyManager.get_proxy_key({"host": p["host"], "port": p["port"]}): {"host": p["host"], "port": p["port"]}
+                           for p in new_config["proxies"]}
+
+            # Обновляем общую конфигурацию
+            self.config.update(new_config)
+
+            # Находим прокси для удаления
+            proxies_to_remove = set(old_proxies.keys()) - \
+                set(new_proxies.keys())
+            for proxy_key in proxies_to_remove:
+                proxy = old_proxies[proxy_key]
+
+                # Удаляем из списков
+                if proxy in self.available_proxies:
+                    self.available_proxies.remove(proxy)
+                if proxy in self.unavailable_proxies:
+                    self.unavailable_proxies.remove(proxy)
+
+                # Закрываем и удаляем сессию
+                if proxy_key in self.sessions:
+                    try:
+                        self.sessions[proxy_key].close()
+                    except Exception:
+                        pass
+                    del self.sessions[proxy_key]
+
+                # Удаляем счетчики ошибок
+                if proxy_key in self.failure_counts:
+                    del self.failure_counts[proxy_key]
+
+                print(f"Removed proxy: {proxy['host']}:{proxy['port']}")
+
+            # Находим новые прокси для добавления
+            proxies_to_add = set(new_proxies.keys()) - set(old_proxies.keys())
+            for proxy_key in proxies_to_add:
+                proxy = new_proxies[proxy_key]
+
+                # Создаем сессию для нового прокси
+                session = self._create_session(proxy)
+                self.sessions[proxy_key] = session
+                self.failure_counts[proxy_key] = 0
+
+                # Тестируем прокси и добавляем в соответствующий список
+                if self._test_proxy(session):
+                    self.available_proxies.append(proxy)
+                    print(
+                        f"Added available proxy: {proxy['host']}:{proxy['port']}")
+                else:
+                    self.unavailable_proxies.append(proxy)
+                    print(
+                        f"Added unavailable proxy: {proxy['host']}:{proxy['port']}")
+
+            print(
+                f"Proxy update completed. Available: {len(self.available_proxies)}, Unavailable: {len(self.unavailable_proxies)}")
+
+    def reload_algorithm(self) -> None:
+        """Перезагрузить алгоритм балансировки на основе текущей конфигурации"""
+        algorithm_name = self.config.get("load_balancing_algorithm", "random")
+        try:
+            new_algorithm = AlgorithmFactory.create_algorithm(algorithm_name)
+            with self.lock:
+                self.load_balancer = new_algorithm
+            print(f"Load balancing algorithm updated to: {algorithm_name}")
+        except ValueError as e:
+            print(f"Ошибка при обновлении алгоритма: {e}")
+            print("Алгоритм балансировки остается без изменений")
+
     def _init_proxies(self):
         for proxy_config in self.config["proxies"]:
             proxy = {"host": proxy_config["host"],

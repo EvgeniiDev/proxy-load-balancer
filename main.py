@@ -3,17 +3,32 @@ import sys
 import time
 
 from balancer import ProxyBalancer
-from balancer.config import load_config
+from balancer.config import ConfigManager
 
 
 def start_balancer(config_file: str, verbose: bool = False):
     try:
-        config = load_config(config_file)
+        # Используем ConfigManager вместо простой загрузки конфигурации
+        config_manager = ConfigManager(config_file)
+        config = config_manager.get_config()
         balancer = ProxyBalancer(config)
+
+        # Настраиваем callback для обновления прокси при изменении конфигурации
+        def on_config_change(new_config):
+            if verbose:
+                print("Configuration changed, updating balancer...")
+            balancer.update_proxies(new_config)
+            balancer.reload_algorithm()
+
+        config_manager.add_change_callback(on_config_change)
+
+        # Запускаем мониторинг изменений конфигурации
+        config_manager.start_monitoring()
 
         print(
             f"Starting proxy balancer on {config['server']['host']}:{config['server']['port']}")
         print(f"Proxies: {len(config['proxies'])}")
+        print(f"Config monitoring: enabled for {config_file}")
         if verbose:
             print("Verbose mode enabled")
 
@@ -24,6 +39,7 @@ def start_balancer(config_file: str, verbose: bool = False):
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\nShutting down...")
+            config_manager.stop_monitoring()
             balancer.stop()
             print("Stopped")
 
