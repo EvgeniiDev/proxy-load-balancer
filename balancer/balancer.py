@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from .proxy_selector_algo import AlgorithmFactory, LoadBalancingAlgorithm
 from .handler import ProxyHandler
 from .server import ProxyBalancerServer
 from .utils import ProxyManager
@@ -21,6 +22,16 @@ class ProxyBalancer:
         self.server = None
         self.health_thread = None
         self.stop_event = threading.Event()
+
+        # Инициализируем алгоритм балансировки
+        algorithm_name = config.get("load_balancing_algorithm", "random")
+        try:
+            self.load_balancer: LoadBalancingAlgorithm = AlgorithmFactory.create_algorithm(
+                algorithm_name)
+        except ValueError as e:
+            print(f"Ошибка инициализации алгоритма: {e}")
+            print("Используется алгоритм по умолчанию: random")
+            self.load_balancer = AlgorithmFactory.create_algorithm("random")
 
     def start(self) -> None:
         self._init_proxies()
@@ -132,7 +143,7 @@ class ProxyBalancer:
         with self.lock:
             if not self.available_proxies:
                 return None
-            return random.choice(self.available_proxies)
+            return self.load_balancer.select_proxy(self.available_proxies)
 
     def get_session(self, proxy: Dict[str, Any]) -> Optional[requests.Session]:
         return self.sessions.get(ProxyManager.get_proxy_key(proxy))

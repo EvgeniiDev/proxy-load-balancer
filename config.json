@@ -2,12 +2,14 @@
   "server": {
     "host": "0.0.0.0",
     "port": 8080
-  },  "proxies": [
+  },
+  "proxies": [
     {
       "host": "127.0.0.1",
       "port": 9150
     }
   ],
+  "load_balancing_algorithm": "round_robin",
   "health_check_interval": 30,
   "connection_timeout": 30,
   "max_retries": 3
