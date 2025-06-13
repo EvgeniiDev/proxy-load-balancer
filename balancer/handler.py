@@ -7,7 +7,7 @@ import socks
 
 class ProxyHandler(BaseHTTPRequestHandler):
     """HTTP обработчик запросов с поддержкой прокси"""
-    
+
     def do_GET(self) -> None:
         self._handle_request()
 
@@ -26,7 +26,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self._handle_request()
 
-    def do_CONNECT(self) -> None:        self._handle_connect()
+    def do_CONNECT(self) -> None:
+        self._handle_connect()
 
     def _handle_request(self) -> None:
         """Обработка стандартных HTTP запросов"""
@@ -42,8 +43,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         try:
             content_length: int = int(self.headers.get('Content-Length', 0))
-            body: bytes = self.rfile.read(content_length) if content_length > 0 else b''
-            
+            body: bytes = self.rfile.read(
+                content_length) if content_length > 0 else b''
+
             headers: Dict[str, str] = dict(self.headers)
             headers.pop('Host', None)
             headers.pop('Connection', None)
@@ -66,7 +68,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             self.send_response(response.status_code)
             for header, value in response.headers.items():
-                if header.lower() not in ['connection', 'transfer-encoding']:                    self.send_header(header, value)
+                if header.lower() not in ['connection', 'transfer-encoding']:
+                    self.send_header(header, value)
             self.end_headers()
 
             if response.content:
@@ -80,14 +83,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
         """Построение целевого URL из запроса"""
         if self.path.startswith('http'):
             return self.path
-        
+
         host: str = self.headers.get('Host', '')
         if ':' in host:
             host, port_str = host.split(':', 1)
             port: int = int(port_str)
         else:
             port = 80
-        
+
         scheme: str = 'https' if port == 443 else 'http'
         return f"{scheme}://{host}:{port}{self.path}" if port not in [80, 443] else f"{scheme}://{host}{self.path}"
 
@@ -112,11 +115,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             port = 443
 
         try:
-            proxy_socket: socket.socket = self._create_proxy_socket(proxy, host, port)
-            
+            proxy_socket: socket.socket = self._create_proxy_socket(
+                proxy, host, port)
+
             self.send_response(200, 'Connection Established')
             self.end_headers()
-            
+
             balancer.mark_success(proxy)
             self._tunnel_data(self.connection, proxy_socket)
 
@@ -137,14 +141,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
         """Туннелирование данных между клиентом и прокси"""
         try:
             proxy_socket.settimeout(30)
-            
+
             while True:
-                ready, _, error = select.select([client_socket, proxy_socket], [], 
-                                              [client_socket, proxy_socket], 1.0)
-                
+                ready, _, error = select.select([client_socket, proxy_socket], [],
+                                                [client_socket, proxy_socket], 1.0)
+
                 if error:
                     break
-                    
+
                 if not ready:
                     continue
 
