@@ -30,9 +30,10 @@ def start_balancer(config_file: str, verbose: bool = False):
 
         balancer.start()
 
+        main_thread_event = threading.Event()
         try:
-            while True:
-                time.sleep(1)
+            # More efficient than while True + sleep
+            main_thread_event.wait()
         except KeyboardInterrupt:
             print("\nShutting down...")
             config_manager.stop_monitoring()

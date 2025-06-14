@@ -58,7 +58,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 data=body,
                 timeout=balancer.config["connection_timeout"],
                 allow_redirects=False,
-                verify=False,
+                verify=True,
+                stream=True,
             )
 
             balancer.mark_success(proxy)
@@ -69,10 +70,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.send_header(header, value)
             self.end_headers()
 
-            if response.content:
-                self.wfile.write(response.content)
+            for chunk in response.iter_content(8192):
+                if chunk:
+                    self.wfile.write(chunk)
 
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.error(f"Proxy error: {str(e)}")
             balancer.mark_failure(proxy)
             self._send_error(502, "Proxy error")
 
@@ -136,44 +140,51 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _tunnel_data(self, client_socket: socket.socket, proxy_socket: socket.socket):
         try:
+            client_socket.settimeout(30)
             proxy_socket.settimeout(30)
-
+            
+            import selectors
+            sel = selectors.DefaultSelector()
+            sel.register(client_socket, selectors.EVENT_READ)
+            sel.register(proxy_socket, selectors.EVENT_READ)
+            
             while True:
-                ready, _, error = select.select(
-                    [client_socket, proxy_socket],
-                    [],
-                    [client_socket, proxy_socket],
-                    1.0,
-                )
-
-                if error:
-                    break
-
-                if not ready:
+                events = sel.select(timeout=1.0)
+                if not events:
                     continue
-
-                if client_socket in ready:
-                    try:
-                        data = client_socket.recv(8192)
-                        if not data:
-                            break
-                        proxy_socket.sendall(data)
-                    except BaseException:
-                        break
-
-                if proxy_socket in ready:
-                    try:
-                        data = proxy_socket.recv(8192)
-                        if not data:
-                            break
-                        client_socket.sendall(data)
-                    except BaseException:
-                        break
-
+                    
+                for key, _ in events:
+                    if key.fileobj == client_socket:
+                        try:
+                            data = client_socket.recv(8192)
+                            if not data:
+                                return
+                            proxy_socket.sendall(data)
+                        except (ConnectionError, TimeoutError, socket.timeout) as e:
+                            return
+                        except Exception:
+                            return
+                            
+                    if key.fileobj == proxy_socket:
+                        try:
+                            data = proxy_socket.recv(8192)
+                            if not data:
+                                return
+                            client_socket.sendall(data)
+                        except (ConnectionError, TimeoutError, socket.timeout) as e:
+                            return
+                        except Exception:
+                            return
         finally:
+            sel.unregister(client_socket)
+            sel.unregister(proxy_socket)
             try:
                 proxy_socket.close()
-            except BaseException:
+            except Exception:
+                pass
+            try:
+                client_socket.close()
+            except Exception:
                 pass
 
     def _send_error(self, code: int, message: str):

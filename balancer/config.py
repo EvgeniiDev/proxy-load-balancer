@@ -17,19 +17,32 @@ class ConfigHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if event.is_directory:
             return
+            
         if Path(str(event.src_path)).resolve() == self.config_file:
             current_time = time.time()
-            if current_time - self.last_modified > 1:
+            # Increase debounce time to 3 seconds
+            if current_time - self.last_modified > 3:
                 self.last_modified = current_time
-                try:
-                    new_config = load_config(str(self.config_file))
-                    if self.validate_config(new_config):
-                        self.callback(new_config)
-                        print(f"Configuration reloaded from {self.config_file}")
-                    else:
-                        print(f"Invalid configuration in {self.config_file}, ignoring changes")
-                except Exception as e:
-                    print(f"Error reloading config: {e}")
+                # Use a separate thread to reload config to avoid blocking the file system watcher
+                thread = threading.Thread(target=self._reload_config)
+                thread.daemon = True
+                thread.start()
+                
+    def _reload_config(self):
+        try:
+            import logging
+            logger = logging.getLogger("config_handler")
+            
+            new_config = load_config(str(self.config_file))
+            if self.validate_config(new_config):
+                self.callback(new_config)
+                logger.info(f"Configuration reloaded from {self.config_file}")
+            else:
+                logger.warning(f"Invalid configuration in {self.config_file}, ignoring changes")
+        except Exception as e:
+            import logging
+            logger = logging.getLogger("config_handler")
+            logger.error(f"Error reloading config: {e}")
 
     def validate_config(self, config: Dict[str, Any]) -> bool:
         required_fields = ["server", "proxies", "health_check_interval", "max_retries"]
