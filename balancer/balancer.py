@@ -248,7 +248,7 @@ class ProxyBalancer:
             self.stop_event.wait(self.config["health_check_interval"])
 
     def _check_unavailable_proxies(self) -> None:
-        if not self.unavailable_proxies:
+        if not self.unavailable_proxies or not self.health_check_pool:
             return
 
         # Check all unavailable proxies in parallel 
@@ -281,7 +281,7 @@ class ProxyBalancer:
                 self.logger.warning(f"Error checking proxy health: {str(e)}")
 
     def _check_available_proxies(self) -> None:
-        if not self.available_proxies:
+        if not self.available_proxies or not self.health_check_pool:
             return
             
         # Sample a subset of proxies to check
@@ -314,7 +314,15 @@ class ProxyBalancer:
             return self.load_balancer.select_proxy(self.available_proxies)
 
     def get_session(self, proxy: Dict[str, Any]) -> Optional[requests.Session]:
-        return self.sessions.get(ProxyManager.get_proxy_key(proxy))
+        proxy_key = ProxyManager.get_proxy_key(proxy)
+        session = self.sessions.get(proxy_key)
+        
+        # If the session doesn't exist, create it
+        if not session:
+            session = self._create_session(proxy)
+            self.sessions[proxy_key] = session
+            
+        return session
 
     def mark_success(self, proxy: Dict[str, Any]) -> None:
         key = ProxyManager.get_proxy_key(proxy)
@@ -327,12 +335,11 @@ class ProxyBalancer:
 
         if self.failure_counts[key] >= self.config["max_retries"]:
             with self.lock:
-                proxy_key_tuple = tuple(sorted(proxy.items()))
-                if proxy_key_tuple in self._available_proxies_set:
-                    self._available_proxies_set.remove(proxy_key_tuple)
+                # Check if proxy is in available proxies and move it to unavailable if it is
+                if proxy in self.available_proxies:
                     self.available_proxies.remove(proxy)
                     self.unavailable_proxies.append(proxy)
-                    self._unavailable_proxies_set.add(proxy_key_tuple)
+                    self.logger.info(f"Marked proxy as unavailable due to failures: {proxy['host']}:{proxy['port']}")
 
     def get_stats(self) -> Dict[str, int]:
         with self.lock:
