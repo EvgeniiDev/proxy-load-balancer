@@ -23,11 +23,9 @@ class ProxyBalancer:
         self.health_thread = None
         self.stop_event = threading.Event()
 
-        # Инициализируем алгоритм балансировки
         algorithm_name = config.get("load_balancing_algorithm", "random")
         try:
-            self.load_balancer: LoadBalancingAlgorithm = AlgorithmFactory.create_algorithm(
-                algorithm_name)
+            self.load_balancer: LoadBalancingAlgorithm = AlgorithmFactory.create_algorithm(algorithm_name)
         except ValueError as e:
             print(f"Ошибка инициализации алгоритма: {e}")
             print("Используется алгоритм по умолчанию: random")
@@ -55,30 +53,23 @@ class ProxyBalancer:
                 pass
 
     def update_proxies(self, new_config: Dict[str, Any]) -> None:
-        """Обновить список прокси на основе новой конфигурации"""
         with self.lock:
-            # Сохраняем старые конфигурации для сравнения
             old_proxies = {ProxyManager.get_proxy_key(p): p for p in (
                 self.available_proxies + self.unavailable_proxies)}
             new_proxies = {ProxyManager.get_proxy_key({"host": p["host"], "port": p["port"]}): {"host": p["host"], "port": p["port"]}
                            for p in new_config["proxies"]}
 
-            # Обновляем общую конфигурацию
             self.config.update(new_config)
 
-            # Находим прокси для удаления
-            proxies_to_remove = set(old_proxies.keys()) - \
-                set(new_proxies.keys())
+            proxies_to_remove = set(old_proxies.keys()) - set(new_proxies.keys())
             for proxy_key in proxies_to_remove:
                 proxy = old_proxies[proxy_key]
 
-                # Удаляем из списков
                 if proxy in self.available_proxies:
                     self.available_proxies.remove(proxy)
                 if proxy in self.unavailable_proxies:
                     self.unavailable_proxies.remove(proxy)
 
-                # Закрываем и удаляем сессию
                 if proxy_key in self.sessions:
                     try:
                         self.sessions[proxy_key].close()
@@ -86,37 +77,30 @@ class ProxyBalancer:
                         pass
                     del self.sessions[proxy_key]
 
-                # Удаляем счетчики ошибок
                 if proxy_key in self.failure_counts:
                     del self.failure_counts[proxy_key]
 
                 print(f"Removed proxy: {proxy['host']}:{proxy['port']}")
 
-            # Находим новые прокси для добавления
             proxies_to_add = set(new_proxies.keys()) - set(old_proxies.keys())
             for proxy_key in proxies_to_add:
                 proxy = new_proxies[proxy_key]
 
-                # Создаем сессию для нового прокси
                 session = self._create_session(proxy)
                 self.sessions[proxy_key] = session
                 self.failure_counts[proxy_key] = 0
 
-                # Тестируем прокси и добавляем в соответствующий список
                 if self._test_proxy(session):
                     self.available_proxies.append(proxy)
-                    print(
-                        f"Added available proxy: {proxy['host']}:{proxy['port']}")
+                    print(f"Added available proxy: {proxy['host']}:{proxy['port']}")
                 else:
                     self.unavailable_proxies.append(proxy)
-                    print(
-                        f"Added unavailable proxy: {proxy['host']}:{proxy['port']}")
+                    print(f"Added unavailable proxy: {proxy['host']}:{proxy['port']}")
 
             print(
                 f"Proxy update completed. Available: {len(self.available_proxies)}, Unavailable: {len(self.unavailable_proxies)}")
 
     def reload_algorithm(self) -> None:
-        """Перезагрузить алгоритм балансировки на основе текущей конфигурации"""
         algorithm_name = self.config.get("load_balancing_algorithm", "random")
         try:
             new_algorithm = AlgorithmFactory.create_algorithm(algorithm_name)
@@ -129,8 +113,7 @@ class ProxyBalancer:
 
     def _init_proxies(self):
         for proxy_config in self.config["proxies"]:
-            proxy = {"host": proxy_config["host"],
-                     "port": proxy_config["port"]}
+            proxy = {"host": proxy_config["host"], "port": proxy_config["port"]}
             session = self._create_session(proxy)
             self.sessions[ProxyManager.get_proxy_key(proxy)] = session
 
@@ -148,8 +131,7 @@ class ProxyBalancer:
         return session
 
     def _test_proxy(self, session: requests.Session) -> bool:
-        test_urls: List[str] = [
-            "http://httpbin.org/ip", "http://icanhazip.com"]
+        test_urls: List[str] = ["http://httpbin.org/ip", "http://icanhazip.com"]
         for url in test_urls:
             try:
                 response = session.get(url, timeout=10)
@@ -161,19 +143,14 @@ class ProxyBalancer:
 
     def _start_server(self) -> None:
         server_config = self.config["server"]
-        self.server = ProxyBalancerServer(
-            (server_config["host"], server_config["port"]), ProxyHandler
-        )
+        self.server = ProxyBalancerServer((server_config["host"], server_config["port"]), ProxyHandler)
         self.server.proxy_balancer = self
 
-        server_thread = threading.Thread(
-            target=self.server.serve_forever, daemon=True)
+        server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         server_thread.start()
 
     def _start_health_checker(self) -> None:
-        self.health_thread = threading.Thread(
-            target=self._health_check_loop, daemon=True
-        )
+        self.health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
         self.health_thread.start()
 
     def _health_check_loop(self) -> None:
@@ -196,8 +173,7 @@ class ProxyBalancer:
                     if proxy in self.unavailable_proxies:
                         self.unavailable_proxies.remove(proxy)
                         self.available_proxies.append(proxy)
-                        self.failure_counts[ProxyManager.get_proxy_key(
-                            proxy)] = 0
+                        self.failure_counts[ProxyManager.get_proxy_key(proxy)] = 0
 
     def _check_available_proxies(self) -> None:
         if not self.available_proxies:

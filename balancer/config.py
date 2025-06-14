@@ -9,10 +9,7 @@ from watchdog.observers import Observer
 
 
 class ConfigHandler(FileSystemEventHandler):
-    """Обработчик изменений файла конфигурации"""
-
-    def __init__(self, config_file: str,
-                 callback: Callable[[Dict[str, Any]], None]):
+    def __init__(self, config_file: str, callback: Callable[[Dict[str, Any]], None]):
         self.config_file = Path(config_file).resolve()
         self.callback = callback
         self.last_modified = 0
@@ -20,9 +17,7 @@ class ConfigHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if event.is_directory:
             return
-        # Проверяем, что изменился именно наш файл конфигурации
         if Path(str(event.src_path)).resolve() == self.config_file:
-            # Добавляем небольшую задержку для избежания множественных событий
             current_time = time.time()
             if current_time - self.last_modified > 1:
                 self.last_modified = current_time
@@ -30,18 +25,14 @@ class ConfigHandler(FileSystemEventHandler):
                     new_config = load_config(str(self.config_file))
                     if self.validate_config(new_config):
                         self.callback(new_config)
-                        print(
-                            f"Configuration reloaded from {self.config_file}")
+                        print(f"Configuration reloaded from {self.config_file}")
                     else:
-                        print(
-                            f"Invalid configuration in {self.config_file}, ignoring changes")
+                        print(f"Invalid configuration in {self.config_file}, ignoring changes")
                 except Exception as e:
                     print(f"Error reloading config: {e}")
 
     def validate_config(self, config: Dict[str, Any]) -> bool:
-        """Валидация конфигурации перед применением"""
-        required_fields = ["server", "proxies",
-                           "health_check_interval", "max_retries"]
+        required_fields = ["server", "proxies", "health_check_interval", "max_retries"]
 
         for field in required_fields:
             if field not in config:
@@ -61,8 +52,6 @@ class ConfigHandler(FileSystemEventHandler):
 
 
 class ConfigManager:
-    """Менеджер конфигурации с поддержкой мониторинга изменений"""
-
     def __init__(self, config_file: str = "config.json"):
         self.config_file = config_file
         self.config = load_config(config_file)
@@ -70,11 +59,9 @@ class ConfigManager:
         self.callbacks = []
 
     def add_change_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """Добавить callback для уведомления об изменениях конфигурации"""
         self.callbacks.append(callback)
 
     def start_monitoring(self):
-        """Запустить мониторинг изменений файла конфигурации"""
         if self.observer is not None:
             return
 
@@ -88,7 +75,6 @@ class ConfigManager:
         print(f"Started monitoring config file: {self.config_file}")
 
     def stop_monitoring(self):
-        """Остановить мониторинг изменений файла конфигурации"""
         if self.observer:
             self.observer.stop()
             self.observer.join()
@@ -96,10 +82,8 @@ class ConfigManager:
             print("Stopped monitoring config file")
 
     def _on_config_changed(self, new_config: Dict[str, Any]):
-        """Обработчик изменений конфигурации"""
         self.config = new_config
 
-        # Уведомляем всех подписчиков об изменениях
         for callback in self.callbacks:
             try:
                 callback(new_config)
@@ -107,11 +91,9 @@ class ConfigManager:
                 print(f"Error in config change callback: {e}")
 
     def get_config(self) -> Dict[str, Any]:
-        """Получить текущую конфигурацию"""
         return self.config.copy()
 
     def reload_config(self):
-        """Принудительно перезагрузить конфигурацию"""
         try:
             new_config = load_config(self.config_file)
             self._on_config_changed(new_config)
@@ -120,6 +102,5 @@ class ConfigManager:
 
 
 def load_config(config_file: str = "config.json") -> Dict[str, Any]:
-    """Загрузить конфигурацию из файла"""
     with open(config_file, "r", encoding='utf-8') as f:
         return json.load(f)

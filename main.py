@@ -8,12 +8,10 @@ from balancer.config import ConfigManager
 
 def start_balancer(config_file: str, verbose: bool = False):
     try:
-        # Используем ConfigManager вместо простой загрузки конфигурации
         config_manager = ConfigManager(config_file)
         config = config_manager.get_config()
         balancer = ProxyBalancer(config)
 
-        # Настраиваем callback для обновления прокси при изменении конфигурации
         def on_config_change(new_config):
             if verbose:
                 print("Configuration changed, updating balancer...")
@@ -22,11 +20,9 @@ def start_balancer(config_file: str, verbose: bool = False):
 
         config_manager.add_change_callback(on_config_change)
 
-        # Запускаем мониторинг изменений конфигурации
         config_manager.start_monitoring()
 
-        print(
-            f"Starting proxy balancer on {config['server']['host']}:{config['server']['port']}")
+        print(f"Starting proxy balancer on {config['server']['host']}:{config['server']['port']}")
         print(f"Proxies: {len(config['proxies'])}")
         print(f"Config monitoring: enabled for {config_file}")
         if verbose:
@@ -63,11 +59,8 @@ def display_help():
 
 def main():
     parser = argparse.ArgumentParser(description="HTTP Proxy Load Balancer")
-    parser.add_argument("-c", "--config", default="config.json",
-                        help="Configuration file path")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Enable verbose output")
-
+    parser.add_argument("-c", "--config", default="config.json", help="Configuration file path")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     args = parser.parse_args()
 
     return start_balancer(args.config, args.verbose)

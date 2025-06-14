@@ -7,8 +7,6 @@ import socks
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
-    """HTTP обработчик запросов с поддержкой прокси"""
-
     def do_GET(self):
         self._handle_request()
 
@@ -43,8 +41,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         try:
             content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(
-                content_length) if content_length > 0 else b""
+            body = self.rfile.read(content_length) if content_length > 0 else b""
 
             headers = dict(self.headers)
             headers.pop("Host", None)
@@ -129,9 +126,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             balancer.mark_failure(proxy)
             self._send_error(502, "Tunnel failed")
 
-    def _create_proxy_socket(
-        self, proxy: Dict[str, Any], target_host: str, target_port: int
-    ) -> socket.socket:
+    def _create_proxy_socket(self, proxy: Dict[str, Any], target_host: str, target_port: int) -> socket.socket:
         sock = socks.socksocket()
         sock.set_proxy(socks.SOCKS5, proxy["host"], proxy["port"])
         sock.settimeout(30)
@@ -139,9 +134,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sock.connect((target_host, target_port))
         return sock
 
-    def _tunnel_data(
-        self, client_socket: socket.socket, proxy_socket: socket.socket
-    ):
+    def _tunnel_data(self, client_socket: socket.socket, proxy_socket: socket.socket):
         try:
             proxy_socket.settimeout(30)
 
