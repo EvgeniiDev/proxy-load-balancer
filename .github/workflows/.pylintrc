@@ -2,3 +2,6 @@
 disable=missing-module-docstring,
         missing-class-docstring,
         missing-function-docstring
+
+[FORMAT]
+max-line-length=140
