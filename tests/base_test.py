@@ -6,9 +6,7 @@ import unittest
 from typing import Dict, List, Any
 import threading
 import requests
-
-from balancer.balancer import ProxyBalancer
-from balancer.config import ConfigManager
+import subprocess
 from tests.mock_socks5_server import MockSocks5ServerManager
 
 
@@ -19,18 +17,15 @@ class BaseLoadBalancerTest(unittest.TestCase):
         """Настройка для каждого теста"""
         self.server_manager = MockSocks5ServerManager()
         self.temp_configs = []
-        self.balancer = None
-        self.balancer_thread = None
+        self.balancer_process = None
         
     def tearDown(self):
         """Очистка после каждого теста"""
         # Останавливаем балансировщик
-        if self.balancer:
-            try:
-                self.balancer.stop()
-            except:
-                pass
-                
+        if self.balancer_process:
+            self.balancer_process.terminate()
+            self.balancer_process.wait(timeout=5)
+            
         # Останавливаем все mock серверы
         self.server_manager.stop_all()
         
@@ -71,36 +66,29 @@ class BaseLoadBalancerTest(unittest.TestCase):
             
         return config_path
         
-    def start_balancer_with_config(self, config_path: str, wait_for_start: float = 0.5) -> ProxyBalancer:
+    def start_balancer_with_config(self, config_path: str, wait_for_start: float = 0.5) -> int:
         """Запускает балансировщик с указанной конфигурацией"""
-        try:
-            config_manager = ConfigManager(config_path)
-            config = config_manager.get_config()
+        with open(config_path) as f:
+            config = json.load(f)
             
-            # Если порт не указан, найдем свободный
-            if config['server']['port'] == 0:
-                import socket
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(('127.0.0.1', 0))
-                    config['server']['port'] = s.getsockname()[1]
-                    
-                # Обновляем конфигурационный файл
-                with open(config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-            
-            self.balancer = ProxyBalancer(config)
-            
-            # Запускаем балансировщик в отдельном потоке
-            self.balancer_thread = threading.Thread(target=self.balancer.start, daemon=True)
-            self.balancer_thread.start()
-            
-            # Даем время на запуск
-            time.sleep(wait_for_start)
-            
-            return self.balancer
-            
-        except Exception as e:
-            self.fail(f"Failed to start balancer: {e}")
+        # Если порт не указан, найдем свободный
+        if config['server']['port'] == 0:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('127.0.0.1', 0))
+                config['server']['port'] = s.getsockname()[1]
+                
+            # Обновляем конфигурационный файл
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+                
+        self.balancer_process = subprocess.Popen([
+            'python', 'main.py', '-c', config_path, '-v'
+        ])
+        
+        time.sleep(wait_for_start)
+        
+        return config['server']['port']
             
     def make_request_through_proxy(self, 
                                   balancer_host: str = "127.0.0.1", 
@@ -114,12 +102,9 @@ class BaseLoadBalancerTest(unittest.TestCase):
             'https': f'http://{balancer_host}:{balancer_port}'
         }
         
-        try:
-            response = requests.get(target_url, proxies=proxies, timeout=timeout)
-            return response
-        except Exception as e:
-            self.fail(f"Request through proxy failed: {e}")
-            
+        response = requests.get(target_url, proxies=proxies, timeout=timeout)
+        return response
+    
     def wait_for_health_check(self, seconds: float = 2):
         """Ждет выполнения health check'а"""
         time.sleep(seconds)

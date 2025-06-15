@@ -1,7 +1,7 @@
 import time
 import unittest
 import json
-from base_test import BaseLoadBalancerTest
+from tests.base_test import BaseLoadBalancerTest
 
 
 class TestProxyLoadBalancerIntegration(BaseLoadBalancerTest):
@@ -23,8 +23,7 @@ class TestProxyLoadBalancerIntegration(BaseLoadBalancerTest):
             health_check_interval=5
         )
         
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         
         for i in range(20):
             try:
@@ -41,5 +40,7 @@ class TestProxyLoadBalancerIntegration(BaseLoadBalancerTest):
         for server in servers:
             self.assertGreater(stats.get(server.port, 0), 0)
             
-        print(f"Stats after stress test: {stats}")
         self.assertGreaterEqual(sum(stats.values()), 20)
+
+if __name__ == '__main__':
+    unittest.main()

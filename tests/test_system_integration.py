@@ -2,7 +2,7 @@ import time
 import unittest
 import json
 from concurrent.futures import ThreadPoolExecutor
-from base_test import BaseLoadBalancerTest
+from tests.base_test import BaseLoadBalancerTest
 
 
 class TestSystemIntegration(BaseLoadBalancerTest):
@@ -10,8 +10,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         servers = self.server_manager.create_servers(4)
         proxies = [{"host": "127.0.0.1", "port": server.port} for server in servers]
         config_path = self.create_test_config(proxies=proxies, algorithm="round_robin", health_check_interval=1)
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         successful_requests = 0
         for _ in range(12):
             try:
@@ -31,8 +30,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         servers = self.server_manager.create_servers(4)
         proxies = [{"host": "127.0.0.1", "port": server.port} for server in servers]
         config_path = self.create_test_config(proxies=proxies, algorithm="round_robin", health_check_interval=1)
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         for _ in range(6):
             try:
                 self.make_request_through_proxy(balancer_port=balancer_port, target_url="http://httpbin.org/status/200", timeout=10)
@@ -69,8 +67,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         servers = self.server_manager.create_servers(2)
         proxies = [{"host": "127.0.0.1", "port": server.port} for server in servers]
         config_path = self.create_test_config(proxies=proxies, algorithm="round_robin", health_check_interval=1)
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         # Make initial requests
         successful_initial = 0
         for _ in range(6):
@@ -109,8 +106,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         servers = self.server_manager.create_servers(3)
         proxies = [{"host": "127.0.0.1", "port": server.port} for server in servers]
         config_path = self.create_test_config(proxies=proxies, algorithm="round_robin", health_check_interval=1)
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         servers[1].stop()
         self.server_manager.mark_server_stopped(servers[1])
         time.sleep(3)
@@ -140,8 +136,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         servers = self.server_manager.create_servers(3)
         proxies = [{"host": "127.0.0.1", "port": server.port} for server in servers]
         config_path = self.create_test_config(proxies=proxies, algorithm="round_robin", health_check_interval=1)
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         successful_requests = 0
         for _ in range(18):
             try:
@@ -159,8 +154,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         servers = self.server_manager.create_servers(3)
         proxies = [{"host": "127.0.0.1", "port": server.port} for server in servers]
         config_path = self.create_test_config(proxies=proxies, algorithm="round_robin", health_check_interval=1)
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         def make_concurrent_request():
             try:
                 response = self.make_request_through_proxy(balancer_port=balancer_port, target_url="http://httpbin.org/delay/1", timeout=15)

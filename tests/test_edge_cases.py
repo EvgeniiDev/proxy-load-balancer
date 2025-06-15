@@ -1,7 +1,7 @@
 import time
 import unittest
 import json
-from base_test import BaseLoadBalancerTest
+from tests.base_test import BaseLoadBalancerTest
 
 
 class TestProxyLoadBalancerEdgeCases(BaseLoadBalancerTest):
@@ -17,12 +17,11 @@ class TestProxyLoadBalancerEdgeCases(BaseLoadBalancerTest):
             health_check_interval=1
         )
         
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         
         # Try to make a request - should fail gracefully
         try:
-            response = self.make_request_through_proxy(
+            self.make_request_through_proxy(
                 balancer_port=balancer_port,
                 target_url="http://httpbin.org/status/200",
                 timeout=5
@@ -46,8 +45,7 @@ class TestProxyLoadBalancerEdgeCases(BaseLoadBalancerTest):
         # Update the config
         with open(config_path, 'w') as f:
             json.dump(updated_config, f, indent=2)
-            
-        balancer.update_proxies(updated_config)
+        
         time.sleep(2)
         
         # Try request again - should work now
@@ -85,14 +83,13 @@ class TestProxyLoadBalancerEdgeCases(BaseLoadBalancerTest):
             connection_timeout=2
         )
         
-        balancer = self.start_balancer_with_config(config_path, wait_for_start=2.0)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path, wait_for_start=2.0)
         
         # Instead of testing the actual retry duration, we'll just verify
         # that the request fails
         try:
             # This expected to fail since all servers are configured to fail
-            response = self.make_request_through_proxy(
+            self.make_request_through_proxy(
                 balancer_port=balancer_port,
                 target_url="http://httpbin.org/status/200",
                 timeout=10
@@ -118,8 +115,7 @@ class TestProxyLoadBalancerEdgeCases(BaseLoadBalancerTest):
             health_check_interval=5
         )
         
-        balancer = self.start_balancer_with_config(config_path)
-        balancer_port = balancer.config['server']['port']
+        balancer_port = self.start_balancer_with_config(config_path)
         
         # Make requests with round-robin
         for i in range(15):
@@ -160,8 +156,6 @@ class TestProxyLoadBalancerEdgeCases(BaseLoadBalancerTest):
         with open(config_path, 'w') as f:
             json.dump(updated_config, f, indent=2)
         
-        balancer.update_proxies(updated_config)
-        balancer.reload_algorithm()
         time.sleep(2)
         
         # Make requests with random algorithm
