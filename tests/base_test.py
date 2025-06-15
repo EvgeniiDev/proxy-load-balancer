@@ -9,7 +9,7 @@ import requests
 
 from balancer.balancer import ProxyBalancer
 from balancer.config import ConfigManager
-from mock_socks5_server import MockSocks5ServerManager
+from tests.mock_socks5_server import MockSocks5ServerManager
 
 
 class BaseLoadBalancerTest(unittest.TestCase):
