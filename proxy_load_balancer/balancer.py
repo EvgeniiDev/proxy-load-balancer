@@ -19,7 +19,7 @@ from .utils import ProxyManager
 class Balancer:
     def __init__(
         self,
-        proxies: List[str],
+        proxies: List[Dict[str, Any]],
         algorithm: LoadBalancingAlgorithm,
         max_retries: int = 3,
         timeout: int = 5,
@@ -31,65 +31,73 @@ class Balancer:
         self.lock = threading.Lock()
         self.proxy_managers: Dict[str, ProxyManager] = {}
         self._initialize_proxies()
+        self.logger = logging.getLogger("proxy_balancer")
 
     def _initialize_proxies(self):
         for proxy in self.proxies:
-            self.proxy_managers[proxy] = ProxyManager(proxy, self.max_retries)
+            key = ProxyManager.get_proxy_key(proxy)
+            self.proxy_managers[key] = ProxyManager()
 
-    def _get_next_proxy(self) -> str:
+    def _get_next_proxy(self) -> Optional[Dict[str, Any]]:
         with self.lock:
-            return self.algorithm.select_proxy(list(self.proxy_managers.keys()))
+            return self.algorithm.select_proxy(self.proxies)
 
     def _request(
         self, method: str, url: str, **kwargs: Any
-    ) -> requests.Response:  # type: ignore
+    ) -> requests.Response:
         retries = 0
         while retries < self.max_retries:
             proxy = self._get_next_proxy()
+            if not proxy:
+                raise Exception("No available proxies")
+            key = ProxyManager.get_proxy_key(proxy)
             try:
-                response = self.proxy_managers[proxy].request(
+                session = requests.Session()
+                session.proxies = {
+                    "http": f"socks5://{proxy['host']}:{proxy['port']}",
+                    "https": f"socks5://{proxy['host']}:{proxy['port']}"
+                }
+                response = session.request(
                     method, url, timeout=self.timeout, **kwargs
                 )
                 if response.status_code == 200:
                     return response
             except Exception as e:
-                logger.warning(
-                    f"Proxy {proxy} failed with exception {e}, retrying... "
+                self.logger.warning(
+                    f"Proxy {key} failed with exception {e}, retrying... "
                 )
                 retries += 1
         raise Exception("Max retries exceeded")
 
-    def get(self, url: str, **kwargs: Any) -> requests.Response:  # type: ignore
+    def get(self, url: str, **kwargs: Any) -> requests.Response:
         return self._request("GET", url, **kwargs)
 
-    def post(self, url: str, **kwargs: Any) -> requests.Response:  # type: ignore
+    def post(self, url: str, **kwargs: Any) -> requests.Response:
         return self._request("POST", url, **kwargs)
 
-    def put(self, url: str, **kwargs: Any) -> requests.Response:  # type: ignore
+    def put(self, url: str, **kwargs: Any) -> requests.Response:
         return self._request("PUT", url, **kwargs)
 
-    def delete(self, url: str, **kwargs: Any) -> requests.Response:  # type: ignore
+    def delete(self, url: str, **kwargs: Any) -> requests.Response:
         return self._request("DELETE", url, **kwargs)
 
 
 class ProxyBalancer:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
-        # Use sets for O(1) membership testing and removal
-        self._available_proxies_set = set()
-        self._unavailable_proxies_set = set()
-        # Keep lists for algorithms that need ordered data
-        self.available_proxies = []
-        self.unavailable_proxies = []
-        self.sessions = weakref.WeakValueDictionary()
-        self.failure_counts = {}
+        self._available_proxies_set: Set[str] = set()
+        self._unavailable_proxies_set: Set[str] = set()
+        self.available_proxies: List[Dict[str, Any]] = []
+        self.unavailable_proxies: List[Dict[str, Any]] = []
+        self.sessions: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+        self.failure_counts: Dict[str, int] = {}
         self.lock = threading.RLock()
         self.server = None
         self.health_thread = None
         self.stop_event = threading.Event()
         self.health_check_pool = None
-        self.logger = self._setup_logger()
-
+        self.logger = logging.getLogger("proxy_balancer")
+        self._setup_logger()
         algorithm_name = config.get("load_balancing_algorithm", "random")
         try:
             self.load_balancer: LoadBalancingAlgorithm = AlgorithmFactory.create_algorithm(algorithm_name)
@@ -97,3 +105,14 @@ class ProxyBalancer:
             self.logger.error(f"Algorithm initialization error: {e}")
             self.logger.info("Using default algorithm: random")
             self.load_balancer = AlgorithmFactory.create_algorithm("random")
+
+    def _setup_logger(self):
+        self.logger.setLevel(logging.INFO)
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+
+    def get_stats(self) -> Dict[str, Any]:
+        return {}

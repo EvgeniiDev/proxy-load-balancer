@@ -25,16 +25,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._handle_request()
 
     def do_CONNECT(self):
-        self._handle_connect()
+        self.send_error(501, "CONNECT not implemented")
 
     def _handle_request(self):
         balancer = getattr(self.server, "proxy_balancer", None)
         if not balancer:
-            self._send_error(503, "Service unavailable")
+            self.send_error(503, "Service unavailable")
             return
         proxy = balancer.get_next_proxy()
         if not proxy:
-            self._send_error(503, "No available proxies")
+            self.send_error(503, "No available proxies")
             return
         try:
             content_length = int(self.headers.get("Content-Length", 0))
@@ -69,7 +69,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             logging.error(f"Proxy error: {str(e)}")
             balancer.mark_failure(proxy)
-            self._send_error(502, "Proxy error")
+            self.send_error(502, "Proxy error")
 
     def _build_url(self) -> str:
         if self.path.startswith("http"):

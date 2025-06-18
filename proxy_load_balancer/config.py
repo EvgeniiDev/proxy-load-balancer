@@ -56,7 +56,7 @@ class ConfigManager:
         self.config_file = config_file
         self.config = load_config(config_file)
         self.observer = None
-        self.callbacks = []
+        self.callbacks: list[Any] = []
     def add_change_callback(self, callback: Callable[[Dict[str, Any]], None]):
         self.callbacks.append(callback)
     def start_monitoring(self):
