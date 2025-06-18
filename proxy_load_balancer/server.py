@@ -3,27 +3,20 @@ import socketserver
 import threading
 from http.server import HTTPServer
 from typing import TYPE_CHECKING, Any, Optional, Tuple
-
 if TYPE_CHECKING:
     from .balancer import ProxyBalancer
-
-
 class ThreadPoolMixin(socketserver.ThreadingMixIn):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=50,  # Configurable but reasonable default
+            max_workers=50,
             thread_name_prefix="proxy_server_worker"
         )
-        
     def process_request(self, request, client_address):
         self._thread_pool.submit(self.process_request_thread, request, client_address)
-        
     def server_close(self):
         self._thread_pool.shutdown(wait=False)
         super().server_close()
-
-
 class ProxyBalancerServer(ThreadPoolMixin, HTTPServer):
     def __init__(self, server_address: Tuple[str, int], RequestHandlerClass, **kwargs):
         self.proxy_balancer: Optional["ProxyBalancer"] = None
