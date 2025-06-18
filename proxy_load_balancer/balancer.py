@@ -135,6 +135,7 @@ class ProxyBalancer:
     def start(self):
         from .handler import ProxyHandler
         from .server import ProxyBalancerServer
+        from .monitor import ProxyMonitor
         host = self.config["server"]["host"]
         port = self.config["server"]["port"]
         self.server = ProxyBalancerServer((host, port), ProxyHandler)
@@ -142,6 +143,19 @@ class ProxyBalancer:
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
         self.logger.info(f"ProxyBalancer server started on {host}:{port}")
+        self.monitor = ProxyMonitor(self)
+        self.monitor.start_monitoring()
+        self._run_initial_health_check()
+
+    def _run_initial_health_check(self):
+        # Имитация health check для всех прокси при старте
+        proxies = self.config.get("proxies", [])
+        for proxy in proxies:
+            # Здесь можно реализовать реальный health check, сейчас просто добавим в available
+            key = ProxyManager.get_proxy_key(proxy)
+            self._available_proxies_set.add(key)
+            if proxy not in self.available_proxies:
+                self.available_proxies.append(proxy)
 
     def stop(self):
         if self.server:
@@ -150,3 +164,38 @@ class ProxyBalancer:
             if hasattr(self, 'server_thread'):
                 self.server_thread.join(timeout=5)
             self.logger.info("ProxyBalancer server stopped")
+
+    def set_config_manager(self, config_manager, on_config_change):
+        self._config_manager = config_manager
+        self._on_config_change = on_config_change
+
+    def get_next_proxy(self) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            return self.load_balancer.select_proxy(self.available_proxies)
+
+    def get_session(self, proxy: Dict[str, Any]) -> requests.Session:
+        key = ProxyManager.get_proxy_key(proxy)
+        if key not in self.sessions:
+            session = requests.Session()
+            session.proxies = {
+                "http": f"socks5://{proxy['host']}:{proxy['port']}",
+                "https": f"socks5://{proxy['host']}:{proxy['port']}"
+            }
+            adapter = HTTPAdapter(max_retries=Retry(total=self.config.get("max_retries", 3)))
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            self.sessions[key] = session
+        return self.sessions[key]
+
+    def mark_success(self, proxy: Dict[str, Any]):
+        key = ProxyManager.get_proxy_key(proxy)
+        self.failure_counts[key] = 0
+        self._available_proxies_set.add(key)
+        self._unavailable_proxies_set.discard(key)
+
+    def mark_failure(self, proxy: Dict[str, Any]):
+        key = ProxyManager.get_proxy_key(proxy)
+        self.failure_counts[key] = self.failure_counts.get(key, 0) + 1
+        if self.failure_counts[key] >= self.config.get("max_retries", 3):
+            self._available_proxies_set.discard(key)
+            self._unavailable_proxies_set.add(key)

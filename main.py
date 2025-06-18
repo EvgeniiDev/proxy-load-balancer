@@ -1,9 +1,20 @@
 import argparse
 import sys
 import threading
+from proxy_load_balancer.balancer import ProxyBalancer
+from proxy_load_balancer.config import ConfigManager
 
-from balancer import ProxyBalancer
-from balancer.config import ConfigManager
+
+def display_help():
+    print("HTTP Proxy Load Balancer")
+    print("")
+    print("Usage:")
+    print("    python main.py [-c config.json] [-v]")
+    print("")
+    print("Options:")
+    print("    -c, --config    Configuration file path")
+    print("    -v, --verbose   Enable verbose output")
+    print("    -h, --help      Show this help message")
 
 
 def start_balancer(config_file: str, verbose: bool = False):
@@ -17,6 +28,8 @@ def start_balancer(config_file: str, verbose: bool = False):
                 print("Configuration changed, updating balancer...")
             balancer.update_proxies(new_config)
             balancer.reload_algorithm()
+
+        balancer.set_config_manager(config_manager, on_config_change)
 
         config_manager.add_change_callback(on_config_change)
 
@@ -45,11 +58,14 @@ def start_balancer(config_file: str, verbose: bool = False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HTTP Proxy Load Balancer")
+    parser = argparse.ArgumentParser(description="HTTP Proxy Load Balancer", add_help=False)
     parser.add_argument("-c", "--config", default="config.json", help="Configuration file path")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("-h", "--help", action="store_true", help="Show this help message")
     args = parser.parse_args()
-
+    if args.help:
+        display_help()
+        return 0
     return start_balancer(args.config, args.verbose)
 
 
