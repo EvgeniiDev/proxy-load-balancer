@@ -1,7 +1,6 @@
 import argparse
 import sys
 import threading
-import time
 
 from balancer import ProxyBalancer
 from balancer.config import ConfigManager
@@ -31,10 +30,8 @@ def start_balancer(config_file: str, verbose: bool = False):
 
         balancer.start()
 
-        main_thread_event = threading.Event()
         try:
-            # More efficient than while True + sleep
-            main_thread_event.wait()
+            threading.Event().wait()
         except KeyboardInterrupt:
             print("\nShutting down...")
             config_manager.stop_monitoring()
@@ -45,18 +42,6 @@ def start_balancer(config_file: str, verbose: bool = False):
         print(f"Config file not found: {config_file}")
     except Exception as e:
         print(f"Error: {e}")
-
-
-def display_help():
-    print("HTTP Proxy Load Balancer")
-    print("")
-    print("Usage:")
-    print("    python main.py [-c config.json] [-v]")
-    print("")
-    print("Options:")
-    print("    -c, --config    Configuration file path")
-    print("    -v, --verbose   Enable verbose output")
-    print("    -h, --help      Show this help message")
 
 
 def main():

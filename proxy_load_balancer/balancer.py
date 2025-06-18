@@ -133,9 +133,20 @@ class ProxyBalancer:
             self.load_balancer = AlgorithmFactory.create_algorithm("random")
 
     def start(self):
-        # Здесь должен быть запуск сервера, healthcheck и т.д.
-        pass
+        from .handler import ProxyHandler
+        from .server import ProxyBalancerServer
+        host = self.config["server"]["host"]
+        port = self.config["server"]["port"]
+        self.server = ProxyBalancerServer((host, port), ProxyHandler)
+        self.server.proxy_balancer = self
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+        self.logger.info(f"ProxyBalancer server started on {host}:{port}")
 
     def stop(self):
-        # Здесь должен быть корректный shutdown сервера и потоков
-        pass
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+            if hasattr(self, 'server_thread'):
+                self.server_thread.join(timeout=5)
+            self.logger.info("ProxyBalancer server stopped")
