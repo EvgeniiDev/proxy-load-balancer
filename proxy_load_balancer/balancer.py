@@ -116,3 +116,26 @@ class ProxyBalancer:
 
     def get_stats(self) -> Dict[str, Any]:
         return {}
+
+    def update_proxies(self, new_config: Dict[str, Any]):
+        self.config = new_config
+        self.available_proxies = new_config.get("proxies", [])
+        self._available_proxies_set = set(
+            ProxyManager.get_proxy_key(proxy) for proxy in self.available_proxies
+        )
+
+    def reload_algorithm(self):
+        algorithm_name = self.config.get("load_balancing_algorithm", "random")
+        try:
+            self.load_balancer = AlgorithmFactory.create_algorithm(algorithm_name)
+        except ValueError:
+            self.logger.error(f"Unknown algorithm: {algorithm_name}, using random")
+            self.load_balancer = AlgorithmFactory.create_algorithm("random")
+
+    def start(self):
+        # Здесь должен быть запуск сервера, healthcheck и т.д.
+        pass
+
+    def stop(self):
+        # Здесь должен быть корректный shutdown сервера и потоков
+        pass
