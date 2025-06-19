@@ -81,6 +81,40 @@ except KeyboardInterrupt:
     print("Балансировщик остановлен.")
 
 ```
+
+```python
+from proxy_load_balancer.balancer import ProxyBalancer
+import time
+
+# 1. Создание конфигурации вручную (словарь)
+manual_config = {
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8888
+  },
+  "proxies": [
+    {"host": "127.0.0.1", "port": 9050},
+    {"host": "127.0.0.1", "port": 9051}
+  ],
+  "load_balancing_algorithm": "random",
+  "health_check_interval": 60
+}
+
+# 2. Создание и запуск балансировщика
+# В этом режиме мониторинг изменений файла конфигурации не используется
+balancer = ProxyBalancer(manual_config)
+balancer.start()
+
+print(f"Балансировщик запущен на {manual_config['server']['host']}:{manual_config['server']['port']}.")
+
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("Остановка балансировщика...")
+    balancer.stop()
+    print("Балансировщик остановлен.")
+```
 Этот подход дает больше гибкости для управления жизненным циклом балансировщика.
 
 ## ⚙️ Конфигурация
