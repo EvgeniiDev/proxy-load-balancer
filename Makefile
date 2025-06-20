@@ -2,7 +2,7 @@
 
 install-test-deps:
 	@echo "Installing test dependencies..."
-	pip install -r requirements-test.txt
+	pip install .[test]
 
 test:
 	@echo "Running integration tests..."
