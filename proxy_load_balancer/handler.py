@@ -1,11 +1,20 @@
 import select
 import socket
+import logging
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Dict, Optional
 import socks
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
+    def send_error(self, code, message=None, explain=None):
+        """Override to handle broken pipe errors gracefully."""
+        try:
+            super().send_error(code, message, explain)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Client connection is broken, can't send response
+            logging.warning(f"Cannot send error {code} to client: connection broken")
+
     def do_GET(self):
         self._handle_request()
 
@@ -64,37 +73,91 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     break
 
                 for s in readable:
-                    data = s.recv(8192)
-                    if not data:
-                        sockets.remove(s)
-                        if s is client_socket:
-                            if remote_socket in sockets:
-                                sockets.remove(remote_socket)
-                                remote_socket.close()
-                        else:
-                            if client_socket in sockets:
-                                sockets.remove(client_socket)
-                                client_socket.close()
-                        if not sockets:
-                            break
-                        continue
+                    try:
+                        data = s.recv(8192)
+                        if not data:
+                            sockets.remove(s)
+                            if s is client_socket:
+                                if remote_socket in sockets:
+                                    sockets.remove(remote_socket)
+                                    try:
+                                        remote_socket.close()
+                                    except:
+                                        pass
+                            else:
+                                if client_socket in sockets:
+                                    sockets.remove(client_socket)
+                                    try:
+                                        client_socket.close()
+                                    except:
+                                        pass
+                            if not sockets:
+                                break
+                            continue
 
-                    if s is client_socket:
-                        remote_socket.sendall(data)
-                    else:
-                        client_socket.sendall(data)
+                        if s is client_socket:
+                            try:
+                                remote_socket.sendall(data)
+                            except (ConnectionResetError, BrokenPipeError):
+                                # Remote connection lost, remove it
+                                if remote_socket in sockets:
+                                    sockets.remove(remote_socket)
+                                    try:
+                                        remote_socket.close()
+                                    except:
+                                        pass
+                                break
+                        else:
+                            try:
+                                client_socket.sendall(data)
+                            except (ConnectionResetError, BrokenPipeError):
+                                # Client connection lost, remove it
+                                if client_socket in sockets:
+                                    sockets.remove(client_socket)
+                                    try:
+                                        client_socket.close()
+                                    except:
+                                        pass
+                                break
+                    except (ConnectionResetError, BrokenPipeError):
+                        # Connection reset during recv, remove the socket
+                        if s in sockets:
+                            sockets.remove(s)
+                            try:
+                                s.close()
+                            except:
+                                pass
+                        if s is client_socket and remote_socket in sockets:
+                            sockets.remove(remote_socket)
+                            try:
+                                remote_socket.close()
+                            except:
+                                pass
+                        elif s is remote_socket and client_socket in sockets:
+                            sockets.remove(client_socket)
+                            try:
+                                client_socket.close()
+                            except:
+                                pass
+                        break
                 if not sockets:
                     break
         except Exception as e:
-            import logging
-
             logging.error(f"CONNECT error: {str(e)}")
             if proxy:
                 balancer.mark_failure(proxy)
-            self.send_error(502, "Proxy error")
+            # Only send error if the connection is still alive
+            try:
+                self.send_error(502, "Proxy error")
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # Client connection is already broken, can't send error response
+                logging.warning("Client connection broken, unable to send error response")
         finally:
             if remote_socket:
-                remote_socket.close()
+                try:
+                    remote_socket.close()
+                except:
+                    pass
 
     def _handle_request(self):
         balancer = getattr(self.server, "proxy_balancer", None)
@@ -132,13 +195,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.end_headers()
             for chunk in response.iter_content(8192):
                 if chunk:
-                    self.wfile.write(chunk)
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        # Client disconnected during data transfer
+                        logging.warning("Client disconnected during data transfer")
+                        break
         except Exception as e:
-            import logging
-
             logging.error(f"Proxy error: {str(e)}")
             balancer.mark_failure(proxy)
-            self.send_error(502, "Proxy error")
+            # Only send error if the connection is still alive
+            try:
+                self.send_error(502, "Proxy error")
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # Client connection is already broken, can't send error response
+                logging.warning("Client connection broken, unable to send error response")
 
     def _build_url(self) -> str:
         if self.path.startswith("http"):

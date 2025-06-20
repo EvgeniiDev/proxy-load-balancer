@@ -12,10 +12,22 @@ class ThreadPoolMixin(socketserver.ThreadingMixIn):
             max_workers=50,
             thread_name_prefix="proxy_server_worker"
         )
+    
+    def _ensure_thread_pool(self):
+        """Ensure thread pool is initialized."""
+        if not hasattr(self, '_thread_pool') or self._thread_pool is None:
+            self._thread_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=50,
+                thread_name_prefix="proxy_server_worker"
+            )
+    
     def process_request(self, request, client_address):
+        self._ensure_thread_pool()
         self._thread_pool.submit(self.process_request_thread, request, client_address)
+    
     def server_close(self):
-        self._thread_pool.shutdown(wait=False)
+        if hasattr(self, '_thread_pool') and self._thread_pool is not None:
+            self._thread_pool.shutdown(wait=False)
         super().server_close()
 class ProxyBalancerServer(ThreadPoolMixin, HTTPServer):
     def __init__(self, server_address: Tuple[str, int], RequestHandlerClass, **kwargs):
