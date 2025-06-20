@@ -148,10 +148,8 @@ class ProxyBalancer:
         self._run_initial_health_check()
 
     def _run_initial_health_check(self):
-        # Имитация health check для всех прокси при старте
         proxies = self.config.get("proxies", [])
         for proxy in proxies:
-            # Здесь можно реализовать реальный health check, сейчас просто добавим в available
             key = ProxyManager.get_proxy_key(proxy)
             self._available_proxies_set.add(key)
             if proxy not in self.available_proxies:

@@ -3,7 +3,7 @@ import os
 import tempfile
 import time
 import unittest
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import threading
 import requests
 import subprocess
@@ -94,6 +94,9 @@ class BaseLoadBalancerTest(unittest.TestCase):
                                   balancer_host: str = "127.0.0.1", 
                                   balancer_port: int = 8080,
                                   target_url: str = "http://httpbin.org/ip",
+                                  method: str = "GET",
+                                  data: Any = None,
+                                  headers: Optional[Dict[str, str]] = None,
                                   timeout: int = 10) -> requests.Response:
         """Делает HTTP запрос через прокси балансировщик"""
         
@@ -102,7 +105,7 @@ class BaseLoadBalancerTest(unittest.TestCase):
             'https': f'http://{balancer_host}:{balancer_port}'
         }
         
-        response = requests.get(target_url, proxies=proxies, timeout=timeout)
+        response = requests.request(method, target_url, proxies=proxies, data=data, headers=headers, timeout=timeout, verify=False)
         return response
     
     def wait_for_health_check(self, seconds: float = 2):

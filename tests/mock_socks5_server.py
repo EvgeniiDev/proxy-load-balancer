@@ -16,6 +16,7 @@ class MockSocks5Server:
         self.thread = None
         self.connections_log = []
         self.connection_count = 0
+        self.requests_count = 0  # Добавляем счетчик проксированных запросов
         self.lock = threading.Lock()
         self.server_manager = None  # Reference to the manager that created this server
         self.should_fail = False  # Flag to simulate failure condition
@@ -129,28 +130,11 @@ class MockSocks5Server:
             response += struct.pack('>H', 8080)  # Bind port
             client_socket.sendall(response)
             
-            # 5. Имитируем проксирование (для тестов имитируем успешную передачу данных)
-            # Wait longer for data in test environment
-            client_socket.settimeout(5.0)
-            try:
-                client_data = client_socket.recv(8192)
-                if client_data:
-                    # For HTTP requests, generate a valid HTTP response
-                    if client_data.startswith(b'GET') or client_data.startswith(b'POST'):
-                        mock_response = b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK'
-                    else:
-                        # For other protocols, just echo something back
-                        mock_response = b'OK'
-                    client_socket.sendall(mock_response)
-            except socket.timeout:
-                # Timeout is normal, just continue
-                pass
-            except Exception as e:
-                import logging
-                logging.error(f"Error handling client data: {e}")
-            
-            # Give client time to receive data before closing
-            time.sleep(0.5)
+            # 5. Проксируем данные к реальному серверу
+            success = self._proxy_data(client_socket, data)
+            if success:
+                with self.lock:
+                    self.requests_count += 1
             
         except socket.error:
             pass
@@ -160,10 +144,103 @@ class MockSocks5Server:
             except:
                 pass
                 
+    def _proxy_data(self, client_socket: socket.socket, connection_data: bytes) -> bool:
+        """Проксирует данные к реальному серверу. Возвращает True при успехе."""
+        try:
+            # Извлекаем информацию о целевом сервере из данных подключения SOCKS5
+            if len(connection_data) < 6:
+                return False
+                
+            cmd = connection_data[1]
+            atyp = connection_data[3]
+            
+            if cmd != 0x01:  # Только CONNECT команда поддерживается
+                return False
+                
+            if atyp == 0x01:  # IPv4
+                target_ip = socket.inet_ntoa(connection_data[4:8])
+                target_port = struct.unpack('>H', connection_data[8:10])[0]
+            elif atyp == 0x03:  # Domain name
+                domain_length = connection_data[4]
+                target_ip = connection_data[5:5+domain_length].decode('utf-8')
+                target_port = struct.unpack('>H', connection_data[5+domain_length:7+domain_length])[0]
+            else:
+                return False
+                
+            # Создаем соединение с реальным сервером
+            target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_socket.settimeout(10.0)
+            
+            try:
+                target_socket.connect((target_ip, target_port))
+                
+                # Проксируем данные между клиентом и сервером
+                client_socket.settimeout(30.0)
+                
+                # Простое проксирование данных
+                import select
+                sockets = [client_socket, target_socket]
+                request_processed = False
+                
+                while sockets:
+                    readable, _, exceptional = select.select(sockets, [], sockets, 1.0)
+                    
+                    if exceptional:
+                        break
+                        
+                    for sock in readable:
+                        try:
+                            data = sock.recv(4096)
+                            if not data:
+                                # Connection closed
+                                if sock in sockets:
+                                    sockets.remove(sock)
+                                    sock.close()
+                                # Close the other socket too
+                                other_sock = target_socket if sock == client_socket else client_socket
+                                if other_sock in sockets:
+                                    sockets.remove(other_sock)
+                                    other_sock.close()
+                                break
+                            else:
+                                # Forward data
+                                other_sock = target_socket if sock == client_socket else client_socket
+                                other_sock.sendall(data)
+                                
+                                # If data from client to server, mark as request processed
+                                if sock == client_socket:
+                                    request_processed = True
+                        except socket.error:
+                            # Error occurred, close both sockets
+                            for s in sockets[:]:
+                                try:
+                                    s.close()
+                                    sockets.remove(s)
+                                except:
+                                    pass
+                            break
+                            
+                return request_processed
+                            
+            except Exception as e:
+                import logging
+                logging.error(f"Error connecting to target server {target_ip}:{target_port}: {e}")
+                return False
+            finally:
+                try:
+                    target_socket.close()
+                except:
+                    pass
+                    
+        except Exception as e:
+            import logging
+            logging.error(f"Error in proxy_data: {e}")
+            return False
+                
     def get_connection_count(self) -> int:
-        """Возвращает количество подключений"""
+        """Возвращает количество обработанных запросов"""
         with self.lock:
-            return self.connection_count
+            return max(self.connection_count, self.requests_count)
             
     def get_connections_log(self) -> List[Dict]:
         """Возвращает лог подключений"""
@@ -174,6 +251,7 @@ class MockSocks5Server:
         """Сбрасывает статистику подключений"""
         with self.lock:
             self.connection_count = 0
+            self.requests_count = 0
             self.connections_log.clear()
 
 

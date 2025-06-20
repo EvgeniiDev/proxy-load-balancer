@@ -25,7 +25,76 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._handle_request()
 
     def do_CONNECT(self):
-        self.send_error(501, "CONNECT not implemented")
+        balancer = getattr(self.server, "proxy_balancer", None)
+        if not balancer:
+            self.send_error(503, "Service unavailable")
+            return
+
+        proxy = balancer.get_next_proxy()
+        if not proxy:
+            self.send_error(503, "No available proxies")
+            return
+
+        remote_socket = None
+        try:
+            dest_host, dest_port_str = self.path.split(":", 1)
+            dest_port = int(dest_port_str)
+
+            remote_socket = socks.socksocket()
+            remote_socket.set_proxy(
+                proxy_type=socks.SOCKS5,
+                addr=proxy["host"],
+                port=proxy["port"],
+                username=proxy.get("username"),
+                password=proxy.get("password"),
+            )
+
+            remote_socket.connect((dest_host, dest_port))
+            balancer.mark_success(proxy)
+            self.send_response(200, "Connection Established")
+            self.end_headers()
+
+            client_socket = self.connection
+            sockets = [client_socket, remote_socket]
+            while True:
+                readable, _, exceptional = select.select(sockets, [], sockets, 60)
+                if exceptional:
+                    break
+                if not readable:
+                    break
+
+                for s in readable:
+                    data = s.recv(8192)
+                    if not data:
+                        sockets.remove(s)
+                        if s is client_socket:
+                            if remote_socket in sockets:
+                                sockets.remove(remote_socket)
+                                remote_socket.close()
+                        else:
+                            if client_socket in sockets:
+                                sockets.remove(client_socket)
+                                client_socket.close()
+                        if not sockets:
+                            break
+                        continue
+
+                    if s is client_socket:
+                        remote_socket.sendall(data)
+                    else:
+                        client_socket.sendall(data)
+                if not sockets:
+                    break
+        except Exception as e:
+            import logging
+
+            logging.error(f"CONNECT error: {str(e)}")
+            if proxy:
+                balancer.mark_failure(proxy)
+            self.send_error(502, "Proxy error")
+        finally:
+            if remote_socket:
+                remote_socket.close()
 
     def _handle_request(self):
         balancer = getattr(self.server, "proxy_balancer", None)
