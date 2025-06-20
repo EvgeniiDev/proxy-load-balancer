@@ -87,10 +87,15 @@ class ProxyBalancer:
         self.config = config
         self._available_proxies_set: Set[str] = set()
         self._unavailable_proxies_set: Set[str] = set()
-        self.available_proxies: List[Dict[str, Any]] = []
+        self.available_proxies: List[Dict[str, Any]] = config.get("proxies", [])
         self.unavailable_proxies: List[Dict[str, Any]] = []
+        self._available_proxies_set = set(
+            ProxyManager.get_proxy_key(proxy) for proxy in self.available_proxies
+        )
         self.sessions: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
         self.failure_counts: Dict[str, int] = {}
+        self.request_counts: Dict[str, int] = {}
+        self.success_counts: Dict[str, int] = {}
         self.lock = threading.RLock()
         self.server = None
         self.health_thread = None
@@ -115,7 +120,40 @@ class ProxyBalancer:
             self.logger.addHandler(handler)
 
     def get_stats(self) -> Dict[str, Any]:
-        return {}
+        with self.lock:
+            total_requests = sum(self.request_counts.values())
+            total_successes = sum(self.success_counts.values())
+            total_failures = sum(self.failure_counts.values())
+            
+            proxy_stats = {}
+            all_proxy_keys = set(self.request_counts.keys()) | set(self.success_counts.keys()) | set(self.failure_counts.keys())
+            
+            for key in all_proxy_keys:
+                requests = self.request_counts.get(key, 0)
+                successes = self.success_counts.get(key, 0)
+                failures = self.failure_counts.get(key, 0)
+                # Success rate should be based on successful requests out of total attempted operations
+                total_operations = successes + failures
+                success_rate = (successes / total_operations * 100) if total_operations > 0 else 0
+                
+                proxy_stats[key] = {
+                    "requests": requests,
+                    "successes": successes,
+                    "failures": failures,
+                    "success_rate": round(success_rate, 2),
+                    "status": "available" if key in self._available_proxies_set else "unavailable"
+                }
+            
+            return {
+                "total_requests": total_requests,
+                "total_successes": total_successes,
+                "total_failures": total_failures,
+                "overall_success_rate": round((total_successes / (total_successes + total_failures) * 100) if (total_successes + total_failures) > 0 else 0, 2),
+                "available_proxies_count": len(self.available_proxies),
+                "unavailable_proxies_count": len(self.unavailable_proxies),
+                "algorithm": type(self.load_balancer).__name__,
+                "proxy_stats": proxy_stats
+            }
 
     def update_proxies(self, new_config: Dict[str, Any]):
         self.config = new_config
@@ -169,7 +207,12 @@ class ProxyBalancer:
 
     def get_next_proxy(self) -> Optional[Dict[str, Any]]:
         with self.lock:
-            return self.load_balancer.select_proxy(self.available_proxies)
+            proxy = self.load_balancer.select_proxy(self.available_proxies)
+            if proxy:
+                key = ProxyManager.get_proxy_key(proxy)
+                self.request_counts[key] = self.request_counts.get(key, 0) + 1
+                self.logger.debug(f"Selected proxy {key} (request #{self.request_counts[key]})")
+            return proxy
 
     def get_session(self, proxy: Dict[str, Any]) -> requests.Session:
         key = ProxyManager.get_proxy_key(proxy)
@@ -187,13 +230,91 @@ class ProxyBalancer:
 
     def mark_success(self, proxy: Dict[str, Any]):
         key = ProxyManager.get_proxy_key(proxy)
-        self.failure_counts[key] = 0
-        self._available_proxies_set.add(key)
-        self._unavailable_proxies_set.discard(key)
+        with self.lock:
+            self.failure_counts[key] = 0
+            self.success_counts[key] = self.success_counts.get(key, 0) + 1
+            self._available_proxies_set.add(key)
+            self._unavailable_proxies_set.discard(key)
+            
+            # Update available_proxies list if proxy is not already there
+            if proxy not in self.available_proxies:
+                self.available_proxies.append(proxy)
+                self.logger.info(f"Proxy {key} restored to available pool")
+            
+            # Remove from unavailable_proxies list if it's there
+            self.unavailable_proxies = [p for p in self.unavailable_proxies if ProxyManager.get_proxy_key(p) != key]
+            
+            self.logger.debug(f"Proxy {key} success (total: {self.success_counts[key]})")
 
     def mark_failure(self, proxy: Dict[str, Any]):
         key = ProxyManager.get_proxy_key(proxy)
-        self.failure_counts[key] = self.failure_counts.get(key, 0) + 1
-        if self.failure_counts[key] >= self.config.get("max_retries", 3):
-            self._available_proxies_set.discard(key)
-            self._unavailable_proxies_set.add(key)
+        with self.lock:
+            self.failure_counts[key] = self.failure_counts.get(key, 0) + 1
+            self.logger.warning(f"Proxy {key} failed (failure #{self.failure_counts[key]})")
+            
+            if self.failure_counts[key] >= self.config.get("max_retries", 3):
+                self._available_proxies_set.discard(key)
+                self._unavailable_proxies_set.add(key)
+                
+                # Remove from available_proxies list
+                self.available_proxies = [p for p in self.available_proxies if ProxyManager.get_proxy_key(p) != key]
+                
+                # Add to unavailable_proxies list if not already there
+                if proxy not in self.unavailable_proxies:
+                    self.unavailable_proxies.append(proxy)
+                
+                self.logger.error(f"Proxy {key} marked as unavailable after {self.failure_counts[key]} failures")
+
+    def print_stats(self) -> None:
+        """Print comprehensive proxy statistics"""
+        stats = self.get_stats()
+        
+        print("\n" + "="*60)
+        print("PROXY LOAD BALANCER STATISTICS")
+        print("="*60)
+        print(f"Algorithm: {stats['algorithm']}")
+        print(f"Total Requests: {stats['total_requests']}")
+        print(f"Total Successes: {stats['total_successes']}")
+        print(f"Total Failures: {stats['total_failures']}")
+        print(f"Overall Success Rate: {stats['overall_success_rate']}%")
+        print(f"Available Proxies: {stats['available_proxies_count']}")
+        print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
+        
+        print("\nPER-PROXY STATISTICS:")
+        print("-" * 60)
+        print(f"{'Proxy':<20} {'Requests':<10} {'Success':<10} {'Failures':<10} {'Rate':<8} {'Status':<12}")
+        print("-" * 60)
+        
+        for proxy_key, proxy_stats in stats['proxy_stats'].items():
+            print(f"{proxy_key:<20} {proxy_stats['requests']:<10} {proxy_stats['successes']:<10} "
+                  f"{proxy_stats['failures']:<10} {proxy_stats['success_rate']:<7}% {proxy_stats['status']:<12}")
+        
+        print("="*60)
+
+    def print_compact_stats(self) -> None:
+        """Print compact proxy statistics for periodic updates"""
+        stats = self.get_stats()
+        
+        print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
+              f"{stats['overall_success_rate']}% success, "
+              f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count']} proxies up | ", end="")
+        
+        proxy_summaries = []
+        for proxy_key, proxy_stats in stats['proxy_stats'].items():
+            if proxy_stats['requests'] > 0:
+                status_symbol = "✓" if proxy_stats['status'] == "available" else "✗"
+                proxy_summaries.append(f"{proxy_key}({proxy_stats['requests']}r/{proxy_stats['success_rate']}%{status_symbol})")
+        
+        print(" | ".join(proxy_summaries))
+
+    def log_stats_summary(self) -> None:
+        """Log a summary of statistics"""
+        stats = self.get_stats()
+        self.logger.info(f"Stats summary - Total requests: {stats['total_requests']}, "
+                        f"Success rate: {stats['overall_success_rate']}%, "
+                        f"Available proxies: {stats['available_proxies_count']}")
+        
+        for proxy_key, proxy_stats in stats['proxy_stats'].items():
+            if proxy_stats['requests'] > 0:
+                self.logger.info(f"Proxy {proxy_key}: {proxy_stats['requests']} requests, "
+                               f"{proxy_stats['success_rate']}% success rate, {proxy_stats['status']}")

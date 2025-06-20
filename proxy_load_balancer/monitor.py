@@ -42,15 +42,42 @@ class ProxyMonitor:
         self.logger.info("Proxy monitoring stopped")
     def _monitor_loop(self):
         interval = 10
+        stats_interval = 60  # Log stats every minute
+        console_stats_interval = 30  # Print detailed stats to console every 30 seconds
         try:
             interval = self.balancer.config.get("monitoring_interval", 10)
+            stats_interval = self.balancer.config.get("stats_log_interval", 60)
+            console_stats_interval = self.balancer.config.get("console_stats_interval", 30)
         except (AttributeError, KeyError):
             pass
+        
+        last_stats_time = 0
+        last_console_stats_time = 0
         while not self.stop_event.wait(interval):
             try:
                 self._collect_stats()
+                
+                current_time = time.time()
+                
+                # Print detailed stats to console periodically
+                if current_time - last_console_stats_time >= console_stats_interval:
+                    compact_mode = self.balancer.config.get("compact_console_stats", False)
+                    if compact_mode:
+                        self.balancer.print_compact_stats()
+                    else:
+                        print("\n" + "="*80)
+                        print("PERIODIC PROXY STATISTICS UPDATE")
+                        print("="*80)
+                        self.balancer.print_stats()
+                    last_console_stats_time = current_time
+                
+                # Log detailed stats periodically
+                if current_time - last_stats_time >= stats_interval:
+                    self.balancer.log_stats_summary()
+                    last_stats_time = current_time
+                    
             except Exception as e:
-                self.logger.error(f"Error collecting stats: {str(e)}")
+                self.logger.error(f"Error in monitoring loop: {str(e)}")
     def _collect_stats(self):
         with self.stats_lock:
             balancer_stats = self.balancer.get_stats()
@@ -85,4 +112,4 @@ class ProxyMonitor:
                 "proxy_stats": proxy_stats
             }
             self.stats_history.append(snapshot)
-            self.logger.info(f"Stats collected: {snapshot}")
+            self.logger.debug(f"Stats collected: {len(proxy_stats)} proxies monitored")
