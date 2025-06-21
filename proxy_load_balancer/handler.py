@@ -7,13 +7,36 @@ import socks
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
+    # Disable server signature to avoid exposing server information
+    server_version = ""
+    sys_version = ""
+    
+    def version_string(self):
+        """Return empty version string to avoid server identification"""
+        return ""
+    
+    def log_message(self, format, *args):
+        """Disable default request logging to avoid traces"""
+        pass
+    
     def send_error(self, code, message=None, explain=None):
-        """Override to handle broken pipe errors gracefully."""
+        """Override to send generic error messages that don't reveal proxy usage."""
         try:
+            # Override message and explanation to avoid revealing proxy information
+            if code == 502:
+                message = "Bad Gateway"
+                explain = "The server encountered a temporary error and could not complete your request."
+            elif code == 503:
+                message = "Service Unavailable"
+                explain = "The server is temporarily unable to service your request."
+            elif code == 504:
+                message = "Gateway Timeout"
+                explain = "The server did not receive a timely response."
+            
             super().send_error(code, message, explain)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # Client connection is broken, can't send response
-            logging.warning(f"Cannot send error {code} to client: connection broken")
+            pass
 
     def do_GET(self):
         self._handle_request()
@@ -143,15 +166,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if not sockets:
                     break
         except Exception as e:
-            logging.error(f"CONNECT error: {str(e)}")
             if proxy:
                 balancer.mark_failure(proxy)
-            # Only send error if the connection is still alive
+            # Send generic error without revealing proxy usage
             try:
-                self.send_error(502, "Proxy error")
+                self.send_error(502, "Bad Gateway")
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Client connection is already broken, can't send error response
-                logging.warning("Client connection broken, unable to send error response")
+                pass
         finally:
             if remote_socket:
                 try:
@@ -172,9 +194,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length) if content_length > 0 else b""
             headers = dict(self.headers)
-            headers.pop("Host", None)
-            headers.pop("Connection", None)
-            headers.pop("Proxy-Connection", None)
+            
+            # Remove only proxy-related headers, keep client headers
+            proxy_headers_to_remove = [
+                "Proxy-Connection", "Proxy-Authorization", "Via", 
+                "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+                "X-Real-IP", "X-Proxy-Authorization", "Proxy-Authenticate",
+                "X-Forwarded-Server", "X-Forwarded-Port", "Forwarded"
+            ]
+            
+            for header in proxy_headers_to_remove:
+                headers.pop(header, None)
+                headers.pop(header.lower(), None)
+            
             url = self._build_url()
             session = balancer.get_session(proxy)
             response = session.request(
@@ -189,9 +221,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
             )
             balancer.mark_success(proxy)
             self.send_response(response.status_code)
+            
+            # Clean response headers to avoid proxy detection
             for header, value in response.headers.items():
-                if header.lower() not in ["connection", "transfer-encoding"]:
+                header_lower = header.lower()
+                # Filter out headers that might expose proxy usage
+                if header_lower not in [
+                    "connection", "transfer-encoding", "via", "x-forwarded-for",
+                    "x-forwarded-host", "x-forwarded-proto", "x-real-ip",
+                    "proxy-connection", "proxy-authenticate", "server"
+                ]:
                     self.send_header(header, value)
+            
             self.end_headers()
             for chunk in response.iter_content(8192):
                 if chunk:
@@ -199,17 +240,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         self.wfile.write(chunk)
                     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                         # Client disconnected during data transfer
-                        logging.warning("Client disconnected during data transfer")
                         break
         except Exception as e:
-            logging.error(f"Proxy error: {str(e)}")
             balancer.mark_failure(proxy)
-            # Only send error if the connection is still alive
+            # Send generic error without revealing proxy usage
             try:
-                self.send_error(502, "Proxy error")
+                self.send_error(502, "Bad Gateway")
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Client connection is already broken, can't send error response
-                logging.warning("Client connection broken, unable to send error response")
+                pass
 
     def _build_url(self) -> str:
         if self.path.startswith("http"):
@@ -226,3 +265,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if port not in [80, 443]
             else f"{scheme}://{host}{self.path}"
         )
+
+    error_message_format = '''<!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>Error response</title>
+    </head>
+    <body>
+        <h1>Error response</h1>
+        <p>Error code: %(code)d</p>
+        <p>Message: %(message)s</p>
+        <p>Error code explanation: %(code)d - %(explain)s</p>
+    </body>
+</html>
+'''

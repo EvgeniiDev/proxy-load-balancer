@@ -222,6 +222,16 @@ class ProxyBalancer:
                 "http": f"socks5://{proxy['host']}:{proxy['port']}",
                 "https": f"socks5://{proxy['host']}:{proxy['port']}"
             }
+            
+            # Configure minimal headers (User-Agent will come from client request)
+            session.headers.update({
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            })
+            
             adapter = HTTPAdapter(max_retries=Retry(total=self.config.get("max_retries", 3)))
             session.mount("http://", adapter)
             session.mount("https://", adapter)
