@@ -4,7 +4,12 @@ setup(
     name="proxy-load-balancer",
     version="0.2.0",
     packages=find_packages(include=["proxy_load_balancer*"]),
-    install_requires=["requests==2.31.0", "PySocks==1.7.1", "watchdog==6.0.0", "urllib3==2.0.0", "certifi==2024.2.2"],
+    install_requires=[
+        "aiohttp>=3.8.0",
+        "watchdog==6.0.0", 
+        "urllib3==2.0.0", 
+        "certifi==2024.2.2"
+    ],
     python_requires=">=3.8",
     extras_require={
         'test': [

@@ -1,356 +1,239 @@
-import concurrent.futures
+import asyncio
+import aiohttp
 import logging
-import random
-import threading
 import time
-import weakref
 from typing import Any, Dict, List, Optional, Set
-from threading import RLock
-from collections import deque
-import queue
-
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from .proxy_selector_algo import AlgorithmFactory, LoadBalancingAlgorithm
-from .handler import ProxyHandler
 from .server import ProxyBalancerServer
 from .utils import ProxyManager
+from .performance import PerformanceMonitor, create_performance_middleware, start_performance_monitoring
 
 
-class Balancer:
-    def __init__(
-        self,
-        proxies: List[Dict[str, Any]],
-        algorithm: LoadBalancingAlgorithm,
-        max_retries: int = 3,
-        timeout: int = 5,
-    ):
-        self.proxies = proxies
-        self.algorithm = algorithm
-        self.max_retries = max_retries
-        self.timeout = timeout
-        self.lock = threading.Lock()
-        self.proxy_managers: Dict[str, ProxyManager] = {}
-        self._initialize_proxies()
-        self.logger = logging.getLogger("proxy_balancer")
-
-    def _initialize_proxies(self):
-        for proxy in self.proxies:
-            key = ProxyManager.get_proxy_key(proxy)
-            self.proxy_managers[key] = ProxyManager()
-
-    def _get_next_proxy(self) -> Optional[Dict[str, Any]]:
-        with self.lock:
-            return self.algorithm.select_proxy(self.proxies)
-
-    def _request(
-        self, method: str, url: str, **kwargs: Any
-    ) -> requests.Response:
-        retries = 0
-        while retries < self.max_retries:
-            proxy = self._get_next_proxy()
-            if not proxy:
-                raise Exception("No available proxies")
-            key = ProxyManager.get_proxy_key(proxy)
-            try:
-                session = requests.Session()
-                session.proxies = {
-                    "http": f"socks5://{proxy['host']}:{proxy['port']}",
-                    "https": f"socks5://{proxy['host']}:{proxy['port']}"
-                }
-                response = session.request(
-                    method, url, timeout=self.timeout, **kwargs
-                )
-                if response.status_code == 200:
-                    return response
-            except Exception as e:
-                self.logger.warning(
-                    f"Proxy {key} failed with exception {e}, retrying... "
-                )
-                retries += 1
-        raise Exception("Max retries exceeded")
-
-    def get(self, url: str, **kwargs: Any) -> requests.Response:
-        return self._request("GET", url, **kwargs)
-
-    def post(self, url: str, **kwargs: Any) -> requests.Response:
-        return self._request("POST", url, **kwargs)
-
-    def put(self, url: str, **kwargs: Any) -> requests.Response:
-        return self._request("PUT", url, **kwargs)
-
-    def delete(self, url: str, **kwargs: Any) -> requests.Response:
-        return self._request("DELETE", url, **kwargs)
+class ProxyStatsManager:
+    def __init__(self):
+        self.success_count = 0
+        self.failure_count = 0
+        self.last_success_time = 0
+        self.last_failure_time = 0
+        self.is_healthy = True
+    
+    def mark_success(self):
+        self.success_count += 1
+        self.last_success_time = time.time()
+        self.is_healthy = True
+    
+    def mark_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        # Mark unhealthy if failure rate is too high
+        if self.failure_count > 5:
+            self.is_healthy = False
+    
+    def get_health_status(self):
+        return {
+            'success_count': self.success_count,
+            'failure_count': self.failure_count,
+            'is_healthy': self.is_healthy,
+            'last_success_time': self.last_success_time,
+            'last_failure_time': self.last_failure_time
+        }
 
 
 class ProxyBalancer:
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self._available_proxies_set: Set[str] = set()
-        self._unavailable_proxies_set: Set[str] = set()
-        self.available_proxies: List[Dict[str, Any]] = config.get("proxies", [])
-        self.unavailable_proxies: List[Dict[str, Any]] = []
-        self._available_proxies_set = set(
-            ProxyManager.get_proxy_key(proxy) for proxy in self.available_proxies
-        )
-        self.sessions: Dict[str, queue.Queue] = {}
-        self.session_pools: Dict[str, List[requests.Session]] = {}
-        self.failure_counts: Dict[str, int] = {}
-        self.request_counts: Dict[str, int] = {}
-        self.success_counts: Dict[str, int] = {}
-        self.stats_lock = threading.Lock()
-        self.proxy_selection_lock = threading.Lock()
-        self.session_lock = threading.Lock()
-        self.server = None
-        self.health_thread = None
-        self.stop_event = threading.Event()
-        self.health_check_pool = None
+        self.proxies = config.get("proxies", [])
+        
+        # Initialize algorithm
+        algorithm_name = config.get("load_balancing_algorithm", "round_robin")
+        self.algorithm = AlgorithmFactory.create_algorithm(algorithm_name)
+        
+        # Performance settings
+        perf_config = config.get("performance", {})
+        self.max_connections = perf_config.get("max_concurrent_connections", 1000)
+        self.connection_timeout = config.get("connection_timeout", 10)
+        self.read_timeout = config.get("read_timeout", 30)
+        self.request_timeout = config.get("request_timeout", 60)
+        
+        # Proxy management with optimized data structures
+        self.proxy_managers: Dict[str, ProxyStatsManager] = {}
+        self._healthy_proxies_cache = []
+        self._cache_expiry = 0
+        self._cache_ttl = 1.0  # Cache healthy proxies for 1 second
+        self._initialize_proxies()
+        
+        # Performance monitoring
+        self.performance_monitor = PerformanceMonitor()
+        
+        # Server with performance config
+        server_config = config.get("server", {})
+        self.host = server_config.get("host", "127.0.0.1")
+        self.port = server_config.get("port", 8080)
+        self.server = ProxyBalancerServer(self.host, self.port, config)
+        self.server.set_proxy_balancer(self)
+        
+        # Add performance middleware
+        perf_middleware = create_performance_middleware(self.performance_monitor)
+        self.server.app.middlewares.append(perf_middleware)
+        
+        # Config manager
+        self.config_manager = None
+        self.config_change_callback = None
+        
+        # Monitoring
+        self.monitor_task = None
+        self.cleanup_task = None
+        
         self.logger = logging.getLogger("proxy_balancer")
-        self._setup_logger()
-        algorithm_name = config.get("load_balancing_algorithm", "random")
-        try:
-            self.load_balancer: LoadBalancingAlgorithm = AlgorithmFactory.create_algorithm(algorithm_name)
-        except ValueError as e:
-            self.logger.error(f"Algorithm initialization error: {e}")
-            self.logger.info("Using default algorithm: random")
-            self.load_balancer = AlgorithmFactory.create_algorithm("random")
-
-    def _setup_logger(self):
-        self.logger.setLevel(logging.INFO)
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-
-    def get_stats(self) -> Dict[str, Any]:
-        with self.stats_lock:
-            total_requests = sum(self.request_counts.values())
-            total_successes = sum(self.success_counts.values())
-            total_failures = sum(self.failure_counts.values())
-            
-            proxy_stats = {}
-            all_proxy_keys = set(self.request_counts.keys()) | set(self.success_counts.keys()) | set(self.failure_counts.keys())
-            
-            for key in all_proxy_keys:
-                requests = self.request_counts.get(key, 0)
-                successes = self.success_counts.get(key, 0)
-                failures = self.failure_counts.get(key, 0)
-                total_operations = successes + failures
-                success_rate = (successes / total_operations * 100) if total_operations > 0 else 0
-                
-                proxy_stats[key] = {
-                    "requests": requests,
-                    "successes": successes,
-                    "failures": failures,
-                    "success_rate": round(success_rate, 2),
-                    "status": "available" if key in self._available_proxies_set else "unavailable"
-                }
-            
-            return {
-                "total_requests": total_requests,
-                "total_successes": total_successes,
-                "total_failures": total_failures,
-                "overall_success_rate": round((total_successes / (total_successes + total_failures) * 100) if (total_successes + total_failures) > 0 else 0, 2),
-                "available_proxies_count": len(self.available_proxies),
-                "unavailable_proxies_count": len(self.unavailable_proxies),
-                "algorithm": type(self.load_balancer).__name__,
-                "proxy_stats": proxy_stats
-            }
-
+        
+        # Server runner
+        self._runner = None
+        self._running = False
+    
+    def _initialize_proxies(self):
+        for proxy in self.proxies:
+            key = ProxyManager.get_proxy_key(proxy)
+            self.proxy_managers[key] = ProxyStatsManager()
+    
+    def get_next_proxy(self) -> Optional[Dict[str, Any]]:
+        # Use cached healthy proxies for better performance
+        current_time = time.time()
+        if current_time > self._cache_expiry:
+            self._healthy_proxies_cache = [
+                proxy for proxy in self.proxies 
+                if self._is_proxy_healthy(proxy)
+            ]
+            self._cache_expiry = current_time + self._cache_ttl
+        
+        # Get proxy from healthy list
+        healthy_proxies = self._healthy_proxies_cache if self._healthy_proxies_cache else self.proxies
+        return self.algorithm.select_proxy(healthy_proxies)
+    
+    def _is_proxy_healthy(self, proxy: Dict[str, Any]) -> bool:
+        proxy_key = ProxyManager.get_proxy_key(proxy)
+        if proxy_key in self.proxy_managers:
+            return self.proxy_managers[proxy_key].is_healthy
+        return True
+    
+    def mark_success(self, proxy: Dict[str, Any]):
+        proxy_key = ProxyManager.get_proxy_key(proxy)
+        if proxy_key in self.proxy_managers:
+            self.proxy_managers[proxy_key].mark_success()
+            # Add to healthy cache if not already present
+            if proxy not in self._healthy_proxies_cache:
+                self._healthy_proxies_cache.append(proxy)
+    
+    def mark_failure(self, proxy: Dict[str, Any]):
+        proxy_key = ProxyManager.get_proxy_key(proxy)
+        if proxy_key in self.proxy_managers:
+            self.proxy_managers[proxy_key].mark_failure()
+            # Remove from healthy cache if unhealthy
+            if not self.proxy_managers[proxy_key].is_healthy and proxy in self._healthy_proxies_cache:
+                self._healthy_proxies_cache.remove(proxy)
+    
     def update_proxies(self, new_config: Dict[str, Any]):
         self.config = new_config
-        self.available_proxies = new_config.get("proxies", [])
-        self._available_proxies_set = set(
-            ProxyManager.get_proxy_key(proxy) for proxy in self.available_proxies
-        )
-
-    def reload_algorithm(self):
-        algorithm_name = self.config.get("load_balancing_algorithm", "random")
+        old_proxies = self.proxies
+        self.proxies = new_config.get("proxies", [])
+        
+        # Update algorithm with new proxies
+        algorithm_name = new_config.get("load_balancing_algorithm", "round_robin")
+        self.algorithm = AlgorithmFactory.create_algorithm(algorithm_name)
+        
+        # Clean up old proxy managers and sessions
         try:
-            self.load_balancer = AlgorithmFactory.create_algorithm(algorithm_name)
-        except ValueError:
-            self.logger.error(f"Unknown algorithm: {algorithm_name}, using random")
-            self.load_balancer = AlgorithmFactory.create_algorithm("random")
-
-    def start(self):
-        from .handler import ProxyHandler
-        from .server import ProxyBalancerServer
-        from .monitor import ProxyMonitor
-        host = self.config["server"]["host"]
-        port = self.config["server"]["port"]
-        self.server = ProxyBalancerServer((host, port), ProxyHandler)
-        self.server.proxy_balancer = self
-        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.server_thread.start()
-        self.logger.info(f"ProxyBalancer server started on {host}:{port}")
-        self.monitor = ProxyMonitor(self)
-        self.monitor.start_monitoring()
-        self._run_initial_health_check()
-
-    def _run_initial_health_check(self):
-        proxies = self.config.get("proxies", [])
-        for proxy in proxies:
-            key = ProxyManager.get_proxy_key(proxy)
-            self._available_proxies_set.add(key)
-            if proxy not in self.available_proxies:
-                self.available_proxies.append(proxy)
-
-    def stop(self):
-        if self.server:
-            self.server.shutdown()
-            self.server.server_close()
-            if hasattr(self, 'server_thread'):
-                self.server_thread.join(timeout=5)
-            self.logger.info("ProxyBalancer server stopped")
-
-    def set_config_manager(self, config_manager, on_config_change):
-        self._config_manager = config_manager
-        self._on_config_change = on_config_change
-
-    def get_next_proxy(self) -> Optional[Dict[str, Any]]:
-        with self.proxy_selection_lock:
-            proxy = self.load_balancer.select_proxy(self.available_proxies)
-            if proxy:
-                key = ProxyManager.get_proxy_key(proxy)
-                with self.stats_lock:
-                    self.request_counts[key] = self.request_counts.get(key, 0) + 1
-                self.logger.debug(f"Selected proxy {key} (request #{self.request_counts[key]})")
-            return proxy
-
-    def get_session(self, proxy: Dict[str, Any]) -> requests.Session:
-        key = ProxyManager.get_proxy_key(proxy)
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._cleanup_old_proxies(old_proxies))
+        except RuntimeError:
+            # No running event loop, skip cleanup
+            pass
         
-        with self.session_lock:
-            if key not in self.session_pools:
-                self.session_pools[key] = []
-            
-            if self.session_pools[key]:
-                return self.session_pools[key].pop()
-            
-            session = requests.Session()
-            session.proxies = {
-                "http": f"socks5://{proxy['host']}:{proxy['port']}",
-                "https": f"socks5://{proxy['host']}:{proxy['port']}"
-            }
-            
-            session.headers.update({
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            })
-            
-            adapter = HTTPAdapter(
-                max_retries=Retry(total=self.config.get("max_retries", 3)),
-                pool_connections=10,
-                pool_maxsize=20
-            )
-            session.mount("http://", adapter)
-            session.mount("https://", adapter)
-            return session
+        # Initialize new proxy managers
+        self._initialize_proxies()
+        
+        self.logger.info(f"Updated proxies: {len(self.proxies)} proxies loaded")
     
-    def return_session(self, proxy: Dict[str, Any], session: requests.Session):
-        key = ProxyManager.get_proxy_key(proxy)
-        with self.session_lock:
-            if key not in self.session_pools:
-                self.session_pools[key] = []
-            if len(self.session_pools[key]) < 5:
-                self.session_pools[key].append(session)
-            else:
-                session.close()
-
-    def mark_success(self, proxy: Dict[str, Any]):
-        key = ProxyManager.get_proxy_key(proxy)
-        with self.stats_lock:
-            self.failure_counts[key] = 0
-            self.success_counts[key] = self.success_counts.get(key, 0) + 1
-            
-        with self.proxy_selection_lock:
-            self._available_proxies_set.add(key)
-            self._unavailable_proxies_set.discard(key)
-            
-            if proxy not in self.available_proxies:
-                self.available_proxies.append(proxy)
-                self.logger.info(f"Proxy {key} restored to available pool")
-            
-            self.unavailable_proxies = [p for p in self.unavailable_proxies if ProxyManager.get_proxy_key(p) != key]
-            
-        self.logger.debug(f"Proxy {key} success (total: {self.success_counts[key]})")
-
-    def mark_failure(self, proxy: Dict[str, Any]):
-        key = ProxyManager.get_proxy_key(proxy)
-        with self.stats_lock:
-            self.failure_counts[key] = self.failure_counts.get(key, 0) + 1
-            failure_count = self.failure_counts[key]
+    async def _cleanup_old_proxies(self, old_proxies: List[Dict[str, Any]]):
+        old_keys = {ProxyManager.get_proxy_key(proxy) for proxy in old_proxies}
+        new_keys = {ProxyManager.get_proxy_key(proxy) for proxy in self.proxies}
         
-        self.logger.warning(f"Proxy {key} failed (failure #{failure_count})")
+        keys_to_remove = old_keys - new_keys
+        for key in keys_to_remove:
+            # Remove proxy manager
+            if key in self.proxy_managers:
+                del self.proxy_managers[key]
+    
+    def reload_algorithm(self):
+        algorithm_name = self.config.get("load_balancing_algorithm", "round_robin")
+        self.algorithm = AlgorithmFactory.create_algorithm(algorithm_name)
+        self.logger.info(f"Reloaded algorithm: {algorithm_name}")
+    
+    def set_config_manager(self, config_manager, callback):
+        self.config_manager = config_manager
+        self.config_change_callback = callback
+    
+    async def _monitor_proxies(self):
+        while self._running:
+            try:
+                # Monitor proxy health
+                await asyncio.sleep(60)  # Check every minute
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error in proxy monitoring: {e}")
+                await asyncio.sleep(5)
+    
+    async def start(self):
+        self._running = True
         
-        if failure_count >= self.config.get("max_retries", 3):
-            with self.proxy_selection_lock:
-                self._available_proxies_set.discard(key)
-                self._unavailable_proxies_set.add(key)
-                
-                self.available_proxies = [p for p in self.available_proxies if ProxyManager.get_proxy_key(p) != key]
-                
-                if proxy not in self.unavailable_proxies:
-                    self.unavailable_proxies.append(proxy)
-                
-                self.logger.error(f"Proxy {key} marked as unavailable after {failure_count} failures")
-
-    def print_stats(self) -> None:
-        """Print comprehensive proxy statistics"""
-        stats = self.get_stats()
+        # Start the server
+        self._runner = await self.server.start()
         
-        print("\n" + "="*60)
-        print("PROXY LOAD BALANCER STATISTICS")
-        print("="*60)
-        print(f"Algorithm: {stats['algorithm']}")
-        print(f"Total Requests: {stats['total_requests']}")
-        print(f"Total Successes: {stats['total_successes']}")
-        print(f"Total Failures: {stats['total_failures']}")
-        print(f"Overall Success Rate: {stats['overall_success_rate']}%")
-        print(f"Available Proxies: {stats['available_proxies_count']}")
-        print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
+        # Start monitoring tasks
+        self.monitor_task = asyncio.create_task(self._monitor_proxies())
         
-        print("\nPER-PROXY STATISTICS:")
-        print("-" * 60)
-        print(f"{'Proxy':<20} {'Requests':<10} {'Success':<10} {'Failures':<10} {'Rate':<8} {'Status':<12}")
-        print("-" * 60)
+        # Start performance monitoring
+        monitor_interval = self.config.get('stats_log_interval', 60)
+        self.performance_task = asyncio.create_task(
+            start_performance_monitoring(self.performance_monitor, monitor_interval)
+        )
         
-        for proxy_key, proxy_stats in stats['proxy_stats'].items():
-            print(f"{proxy_key:<20} {proxy_stats['requests']:<10} {proxy_stats['successes']:<10} "
-                  f"{proxy_stats['failures']:<10} {proxy_stats['success_rate']:<7}% {proxy_stats['status']:<12}")
+        self.logger.info(f"Proxy balancer started on {self.host}:{self.port}")
+        self.logger.info(f"Loaded {len(self.proxies)} proxies")
+        print(f"✅ Proxy balancer server started successfully on {self.host}:{self.port}")
         
-        print("="*60)
-
-    def print_compact_stats(self) -> None:
-        """Print compact proxy statistics for periodic updates"""
-        stats = self.get_stats()
+        return self._runner
+    
+    async def stop(self):
+        self._running = False
         
-        print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
-              f"{stats['overall_success_rate']}% success, "
-              f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count']} proxies up | ", end="")
+        # Cancel monitoring tasks
+        if self.monitor_task:
+            self.monitor_task.cancel()
+            try:
+                await self.monitor_task
+            except asyncio.CancelledError:
+                pass
         
-        proxy_summaries = []
-        for proxy_key, proxy_stats in stats['proxy_stats'].items():
-            if proxy_stats['requests'] > 0:
-                status_symbol = "✓" if proxy_stats['status'] == "available" else "✗"
-                proxy_summaries.append(f"{proxy_key}({proxy_stats['requests']}r/{proxy_stats['success_rate']}%{status_symbol})")
+        # Cancel performance monitoring
+        if hasattr(self, 'performance_task') and self.performance_task:
+            self.performance_task.cancel()
+            try:
+                await self.performance_task
+            except asyncio.CancelledError:
+                pass
         
-        print(" | ".join(proxy_summaries))
-
-    def log_stats_summary(self) -> None:
-        """Log a summary of statistics"""
-        stats = self.get_stats()
-        self.logger.info(f"Stats summary - Total requests: {stats['total_requests']}, "
-                        f"Success rate: {stats['overall_success_rate']}%, "
-                        f"Available proxies: {stats['available_proxies_count']}")
+        # Log final performance stats
+        final_stats = self.performance_monitor.get_stats()
+        self.logger.info(f"Final stats: {final_stats['total_requests']} requests processed, "
+                        f"avg response time: {final_stats['response_time'].get('avg', 0):.3f}s")
         
-        for proxy_key, proxy_stats in stats['proxy_stats'].items():
-            if proxy_stats['requests'] > 0:
-                self.logger.info(f"Proxy {proxy_key}: {proxy_stats['requests']} requests, "
-                               f"{proxy_stats['success_rate']}% success rate, {proxy_stats['status']}")
+        # Close all sessions
+        # Nothing to close as we're not managing sessions now
+        
+        # Stop the server
+        if self._runner:
+            await self.server.stop(self._runner)
+        
+        self.logger.info("Proxy balancer stopped")

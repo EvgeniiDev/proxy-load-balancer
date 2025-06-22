@@ -1,6 +1,7 @@
+import asyncio
 import argparse
 import sys
-import threading
+import signal
 from proxy_load_balancer.balancer import ProxyBalancer
 from proxy_load_balancer.config import ConfigManager
 
@@ -17,10 +18,37 @@ def display_help():
     print("    -h, --help      Show this help message")
 
 
-def start_balancer(config_file: str, verbose: bool = False):
+async def configure_performance_settings(perf_config: dict):
+    """Configure asyncio and system performance settings"""
+    import gc
+
+    # Configure garbage collection for better performance
+    gc.set_threshold(700, 10, 10)
+
+    # Set asyncio policies for better performance if available
+    try:
+        if hasattr(asyncio, 'set_event_loop_policy'):
+            if sys.platform == 'win32':
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            else:
+                try:
+                    import uvloop
+                    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+                except ImportError:
+                    pass  # Use default policy
+    except Exception:
+        pass  # Use default settings
+
+
+async def start_balancer(config_file: str, verbose: bool = False):
     try:
         config_manager = ConfigManager(config_file)
         config = config_manager.get_config()
+
+        # Configure performance settings
+        if 'performance' in config:
+            await configure_performance_settings(config['performance'])
+
         balancer = ProxyBalancer(config)
 
         def on_config_change(new_config):
@@ -30,9 +58,7 @@ def start_balancer(config_file: str, verbose: bool = False):
             balancer.reload_algorithm()
 
         balancer.set_config_manager(config_manager, on_config_change)
-
         config_manager.add_change_callback(on_config_change)
-
         config_manager.start_monitoring()
 
         print(f"Starting proxy balancer on {config['server']['host']}:{config['server']['port']}")
@@ -40,21 +66,52 @@ def start_balancer(config_file: str, verbose: bool = False):
         print(f"Config monitoring: enabled for {config_file}")
         if verbose:
             print("Verbose mode enabled")
+            if 'performance' in config:
+                perf = config['performance']
+                print(f"Performance: max_connections={perf.get('max_concurrent_connections', 1000)}, "
+                      f"pool_size={perf.get('connection_pool_size', 100)}")
 
-        balancer.start()
+        # Start the balancer
+        runner = await balancer.start()
+
+        # Setup graceful shutdown with proper signal handling
+        shutdown_event = asyncio.Event()
+
+        def signal_handler():
+            print("\nShutting down...")
+            shutdown_event.set()
+
+        if sys.platform != 'win32':
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, signal_handler)
 
         try:
-            threading.Event().wait()
+            # Efficient wait for shutdown instead of busy loop
+            await shutdown_event.wait()
         except KeyboardInterrupt:
             print("\nShutting down...")
-            config_manager.stop_monitoring()
-            balancer.stop()
-            print("Stopped")
+        finally:
+            await shutdown(balancer, config_manager)
 
     except FileNotFoundError:
         print(f"Config file not found: {config_file}")
+        return 1
     except Exception as e:
         print(f"Error: {e}")
+        return 1
+
+    return 0
+
+
+async def shutdown(balancer: ProxyBalancer, config_manager: ConfigManager):
+    config_manager.stop_monitoring()
+    await balancer.stop()
+    print("Stopped")
+
+    # Stop the event loop
+    loop = asyncio.get_running_loop()
+    loop.stop()
 
 
 def main():
@@ -63,10 +120,16 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message")
     args = parser.parse_args()
+
     if args.help:
         display_help()
         return 0
-    return start_balancer(args.config, args.verbose)
+
+    try:
+        return asyncio.run(start_balancer(args.config, args.verbose))
+    except KeyboardInterrupt:
+        print("\nShutdown complete")
+        return 0
 
 
 if __name__ == "__main__":

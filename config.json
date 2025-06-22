@@ -1,20 +1,35 @@
 {
   "server": {
     "host": "0.0.0.0",
-    "port": 8080
+    "port": 8080,
+    "keepalive_timeout": 75,
+    "client_timeout": 30,
+    "access_log": false
   },
   "proxies": [
     {
       "host": "127.0.0.1",
-      "port": 9150
+      "port": 9151
     }
   ],
-  "load_balancing_algorithm": "fast_round_robin",
+  "load_balancing_algorithm": "round_robin",
   "health_check_interval": 30,
-  "connection_timeout": 30,
+  "connection_timeout": 10,
+  "read_timeout": 30,
   "max_retries": 3,
   "monitoring_interval": 10,
   "stats_log_interval": 60,
   "console_stats_interval": 30,
-  "compact_console_stats": false
+  "compact_console_stats": false,
+  "performance": {
+    "max_concurrent_connections": 1000,
+    "connection_pool_size": 100,
+    "dns_cache_ttl": 300,
+    "keepalive_connections": true,
+    "tcp_keepalive": true,
+    "enable_http2": false,
+    "buffer_size": 65536,
+    "max_line_size": 8192,
+    "max_field_size": 8192
+  }
 }
