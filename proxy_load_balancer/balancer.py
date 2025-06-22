@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional, Set
 from .proxy_selector_algo import AlgorithmFactory, LoadBalancingAlgorithm
 from .server import ProxyBalancerServer
 from .utils import ProxyManager
-from .performance import PerformanceMonitor, create_performance_middleware, start_performance_monitoring
 
 
 class ProxyStatsManager:
@@ -63,19 +62,12 @@ class ProxyBalancer:
         self._cache_ttl = 1.0  # Cache healthy proxies for 1 second
         self._initialize_proxies()
         
-        # Performance monitoring
-        self.performance_monitor = PerformanceMonitor()
-        
         # Server with performance config
         server_config = config.get("server", {})
         self.host = server_config.get("host", "127.0.0.1")
         self.port = server_config.get("port", 8080)
         self.server = ProxyBalancerServer(self.host, self.port, config)
         self.server.set_proxy_balancer(self)
-        
-        # Add performance middleware
-        perf_middleware = create_performance_middleware(self.performance_monitor)
-        self.server.app.middlewares.append(perf_middleware)
         
         # Config manager
         self.config_manager = None
@@ -193,12 +185,6 @@ class ProxyBalancer:
         # Start monitoring tasks
         self.monitor_task = asyncio.create_task(self._monitor_proxies())
         
-        # Start performance monitoring
-        monitor_interval = self.config.get('stats_log_interval', 60)
-        self.performance_task = asyncio.create_task(
-            start_performance_monitoring(self.performance_monitor, monitor_interval)
-        )
-        
         self.logger.info(f"Proxy balancer started on {self.host}:{self.port}")
         self.logger.info(f"Loaded {len(self.proxies)} proxies")
         print(f"✅ Proxy balancer server started successfully on {self.host}:{self.port}")
@@ -215,19 +201,6 @@ class ProxyBalancer:
                 await self.monitor_task
             except asyncio.CancelledError:
                 pass
-        
-        # Cancel performance monitoring
-        if hasattr(self, 'performance_task') and self.performance_task:
-            self.performance_task.cancel()
-            try:
-                await self.performance_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Log final performance stats
-        final_stats = self.performance_monitor.get_stats()
-        self.logger.info(f"Final stats: {final_stats['total_requests']} requests processed, "
-                        f"avg response time: {final_stats['response_time'].get('avg', 0):.3f}s")
         
         # Close all sessions
         # Nothing to close as we're not managing sessions now

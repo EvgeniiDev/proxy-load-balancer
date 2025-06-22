@@ -4,6 +4,7 @@ import sys
 import signal
 from proxy_load_balancer.balancer import ProxyBalancer
 from proxy_load_balancer.config import ConfigManager
+from proxy_load_balancer.connect_server import ConnectTunnelServer
 
 
 def display_help():
@@ -41,6 +42,14 @@ async def configure_performance_settings(perf_config: dict):
 
 
 async def start_balancer(config_file: str, verbose: bool = False):
+    import logging
+    
+    # Configure logging
+    if verbose:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    else:
+        logging.basicConfig(level=logging.WARNING)
+    
     try:
         config_manager = ConfigManager(config_file)
         config = config_manager.get_config()
@@ -62,6 +71,16 @@ async def start_balancer(config_file: str, verbose: bool = False):
         config_manager.start_monitoring()
 
         print(f"Starting proxy balancer on {config['server']['host']}:{config['server']['port']}")
+        
+        # Start CONNECT tunnel server if configured
+        connect_server = None
+        if config.get('connect_server', {}).get('enabled', True):
+            connect_port = config.get('connect_server', {}).get('port', config['server']['port'] + 1)
+            connect_host = config.get('connect_server', {}).get('host', config['server']['host'])
+            connect_server = ConnectTunnelServer(connect_host, connect_port, balancer, config)
+            await connect_server.start()
+            print(f"CONNECT tunnel server started on {connect_host}:{connect_port}")
+        
         print(f"Proxies: {len(config['proxies'])}")
         print(f"Config monitoring: enabled for {config_file}")
         if verbose:
@@ -71,7 +90,7 @@ async def start_balancer(config_file: str, verbose: bool = False):
                 print(f"Performance: max_connections={perf.get('max_concurrent_connections', 1000)}, "
                       f"pool_size={perf.get('connection_pool_size', 100)}")
 
-        # Start the balancer
+        # Start the main HTTP balancer
         runner = await balancer.start()
 
         # Setup graceful shutdown with proper signal handling
@@ -92,7 +111,7 @@ async def start_balancer(config_file: str, verbose: bool = False):
         except KeyboardInterrupt:
             print("\nShutting down...")
         finally:
-            await shutdown(balancer, config_manager)
+            await shutdown(balancer, config_manager, connect_server)
 
     except FileNotFoundError:
         print(f"Config file not found: {config_file}")
@@ -104,9 +123,12 @@ async def start_balancer(config_file: str, verbose: bool = False):
     return 0
 
 
-async def shutdown(balancer: ProxyBalancer, config_manager: ConfigManager):
+async def shutdown(balancer: ProxyBalancer, config_manager: ConfigManager, connect_server=None):
     config_manager.stop_monitoring()
     await balancer.stop()
+    if connect_server:
+        await connect_server.stop()
+        print("CONNECT server stopped")
     print("Stopped")
 
     # Stop the event loop

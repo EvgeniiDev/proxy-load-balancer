@@ -6,6 +6,11 @@
     "client_timeout": 30,
     "access_log": false
   },
+  "connect_server": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8081
+  },
   "proxies": [
     {
       "host": "127.0.0.1",
