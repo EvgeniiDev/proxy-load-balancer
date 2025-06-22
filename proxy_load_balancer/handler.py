@@ -190,12 +190,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not proxy:
             self.send_error(503, "No available proxies")
             return
+        
+        session = None
         try:
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length) if content_length > 0 else b""
             headers = dict(self.headers)
             
-            # Remove only proxy-related headers, keep client headers
             proxy_headers_to_remove = [
                 "Proxy-Connection", "Proxy-Authorization", "Via", 
                 "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
@@ -222,10 +223,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             balancer.mark_success(proxy)
             self.send_response(response.status_code)
             
-            # Clean response headers to avoid proxy detection
             for header, value in response.headers.items():
                 header_lower = header.lower()
-                # Filter out headers that might expose proxy usage
                 if header_lower not in [
                     "connection", "transfer-encoding", "via", "x-forwarded-for",
                     "x-forwarded-host", "x-forwarded-proto", "x-real-ip",
@@ -239,15 +238,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     try:
                         self.wfile.write(chunk)
                     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                        # Client disconnected during data transfer
                         break
+            
+            balancer.return_session(proxy, session)
+            
         except Exception as e:
             balancer.mark_failure(proxy)
-            # Send generic error without revealing proxy usage
+            if session:
+                session.close()
             try:
                 self.send_error(502, "Bad Gateway")
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                # Client connection is already broken, can't send error response
                 pass
 
     def _build_url(self) -> str:

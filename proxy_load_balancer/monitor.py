@@ -83,12 +83,13 @@ class ProxyMonitor:
             balancer_stats = self.balancer.get_stats()
             timestamp = time.time()
             proxy_stats = []
-            with self.balancer.lock:
+            with self.balancer.proxy_selection_lock:
                 all_proxies = self.balancer.available_proxies + self.balancer.unavailable_proxies
                 for proxy in all_proxies:
                     proxy_key = ProxyManager.get_proxy_key(proxy)
                     is_available = proxy in self.balancer.available_proxies
-                    failures = self.balancer.failure_counts.get(proxy_key, 0)
+                    with self.balancer.stats_lock:
+                        failures = self.balancer.failure_counts.get(proxy_key, 0)
                     proxy_info = {
                         "host": proxy["host"],
                         "port": proxy["port"],

@@ -9,7 +9,7 @@
       "port": 9150
     }
   ],
-  "load_balancing_algorithm": "round_robin",
+  "load_balancing_algorithm": "fast_round_robin",
   "health_check_interval": 30,
   "connection_timeout": 30,
   "max_retries": 3,

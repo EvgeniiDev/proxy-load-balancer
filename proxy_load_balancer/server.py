@@ -9,7 +9,7 @@ class ThreadPoolMixin(socketserver.ThreadingMixIn):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=50,
+            max_workers=500,
             thread_name_prefix="proxy_server_worker"
         )
     
@@ -17,7 +17,7 @@ class ThreadPoolMixin(socketserver.ThreadingMixIn):
         """Ensure thread pool is initialized."""
         if not hasattr(self, '_thread_pool') or self._thread_pool is None:
             self._thread_pool = concurrent.futures.ThreadPoolExecutor(
-                max_workers=50,
+                max_workers=500,
                 thread_name_prefix="proxy_server_worker"
             )
     

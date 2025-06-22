@@ -5,6 +5,9 @@ import threading
 import time
 import weakref
 from typing import Any, Dict, List, Optional, Set
+from threading import RLock
+from collections import deque
+import queue
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -92,11 +95,14 @@ class ProxyBalancer:
         self._available_proxies_set = set(
             ProxyManager.get_proxy_key(proxy) for proxy in self.available_proxies
         )
-        self.sessions: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+        self.sessions: Dict[str, queue.Queue] = {}
+        self.session_pools: Dict[str, List[requests.Session]] = {}
         self.failure_counts: Dict[str, int] = {}
         self.request_counts: Dict[str, int] = {}
         self.success_counts: Dict[str, int] = {}
-        self.lock = threading.RLock()
+        self.stats_lock = threading.Lock()
+        self.proxy_selection_lock = threading.Lock()
+        self.session_lock = threading.Lock()
         self.server = None
         self.health_thread = None
         self.stop_event = threading.Event()
@@ -120,7 +126,7 @@ class ProxyBalancer:
             self.logger.addHandler(handler)
 
     def get_stats(self) -> Dict[str, Any]:
-        with self.lock:
+        with self.stats_lock:
             total_requests = sum(self.request_counts.values())
             total_successes = sum(self.success_counts.values())
             total_failures = sum(self.failure_counts.values())
@@ -132,7 +138,6 @@ class ProxyBalancer:
                 requests = self.request_counts.get(key, 0)
                 successes = self.success_counts.get(key, 0)
                 failures = self.failure_counts.get(key, 0)
-                # Success rate should be based on successful requests out of total attempted operations
                 total_operations = successes + failures
                 success_rate = (successes / total_operations * 100) if total_operations > 0 else 0
                 
@@ -206,24 +211,31 @@ class ProxyBalancer:
         self._on_config_change = on_config_change
 
     def get_next_proxy(self) -> Optional[Dict[str, Any]]:
-        with self.lock:
+        with self.proxy_selection_lock:
             proxy = self.load_balancer.select_proxy(self.available_proxies)
             if proxy:
                 key = ProxyManager.get_proxy_key(proxy)
-                self.request_counts[key] = self.request_counts.get(key, 0) + 1
+                with self.stats_lock:
+                    self.request_counts[key] = self.request_counts.get(key, 0) + 1
                 self.logger.debug(f"Selected proxy {key} (request #{self.request_counts[key]})")
             return proxy
 
     def get_session(self, proxy: Dict[str, Any]) -> requests.Session:
         key = ProxyManager.get_proxy_key(proxy)
-        if key not in self.sessions:
+        
+        with self.session_lock:
+            if key not in self.session_pools:
+                self.session_pools[key] = []
+            
+            if self.session_pools[key]:
+                return self.session_pools[key].pop()
+            
             session = requests.Session()
             session.proxies = {
                 "http": f"socks5://{proxy['host']}:{proxy['port']}",
                 "https": f"socks5://{proxy['host']}:{proxy['port']}"
             }
             
-            # Configure minimal headers (User-Agent will come from client request)
             session.headers.update({
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
@@ -232,48 +244,62 @@ class ProxyBalancer:
                 'Upgrade-Insecure-Requests': '1'
             })
             
-            adapter = HTTPAdapter(max_retries=Retry(total=self.config.get("max_retries", 3)))
+            adapter = HTTPAdapter(
+                max_retries=Retry(total=self.config.get("max_retries", 3)),
+                pool_connections=10,
+                pool_maxsize=20
+            )
             session.mount("http://", adapter)
             session.mount("https://", adapter)
-            self.sessions[key] = session
-        return self.sessions[key]
+            return session
+    
+    def return_session(self, proxy: Dict[str, Any], session: requests.Session):
+        key = ProxyManager.get_proxy_key(proxy)
+        with self.session_lock:
+            if key not in self.session_pools:
+                self.session_pools[key] = []
+            if len(self.session_pools[key]) < 5:
+                self.session_pools[key].append(session)
+            else:
+                session.close()
 
     def mark_success(self, proxy: Dict[str, Any]):
         key = ProxyManager.get_proxy_key(proxy)
-        with self.lock:
+        with self.stats_lock:
             self.failure_counts[key] = 0
             self.success_counts[key] = self.success_counts.get(key, 0) + 1
+            
+        with self.proxy_selection_lock:
             self._available_proxies_set.add(key)
             self._unavailable_proxies_set.discard(key)
             
-            # Update available_proxies list if proxy is not already there
             if proxy not in self.available_proxies:
                 self.available_proxies.append(proxy)
                 self.logger.info(f"Proxy {key} restored to available pool")
             
-            # Remove from unavailable_proxies list if it's there
             self.unavailable_proxies = [p for p in self.unavailable_proxies if ProxyManager.get_proxy_key(p) != key]
             
-            self.logger.debug(f"Proxy {key} success (total: {self.success_counts[key]})")
+        self.logger.debug(f"Proxy {key} success (total: {self.success_counts[key]})")
 
     def mark_failure(self, proxy: Dict[str, Any]):
         key = ProxyManager.get_proxy_key(proxy)
-        with self.lock:
+        with self.stats_lock:
             self.failure_counts[key] = self.failure_counts.get(key, 0) + 1
-            self.logger.warning(f"Proxy {key} failed (failure #{self.failure_counts[key]})")
-            
-            if self.failure_counts[key] >= self.config.get("max_retries", 3):
+            failure_count = self.failure_counts[key]
+        
+        self.logger.warning(f"Proxy {key} failed (failure #{failure_count})")
+        
+        if failure_count >= self.config.get("max_retries", 3):
+            with self.proxy_selection_lock:
                 self._available_proxies_set.discard(key)
                 self._unavailable_proxies_set.add(key)
                 
-                # Remove from available_proxies list
                 self.available_proxies = [p for p in self.available_proxies if ProxyManager.get_proxy_key(p) != key]
                 
-                # Add to unavailable_proxies list if not already there
                 if proxy not in self.unavailable_proxies:
                     self.unavailable_proxies.append(proxy)
                 
-                self.logger.error(f"Proxy {key} marked as unavailable after {self.failure_counts[key]} failures")
+                self.logger.error(f"Proxy {key} marked as unavailable after {failure_count} failures")
 
     def print_stats(self) -> None:
         """Print comprehensive proxy statistics"""
