@@ -8,10 +8,12 @@ from typing import Any, Dict, List, Optional, Set
 from threading import RLock
 from collections import deque
 import queue
+import socket
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import socks
 
 from .proxy_selector_algo import AlgorithmFactory, LoadBalancingAlgorithm
 from .handler import ProxyHandler
@@ -107,6 +109,8 @@ class ProxyBalancer:
         self.health_thread = None
         self.stop_event = threading.Event()
         self.health_check_pool = None
+        self.health_check_stop_event = threading.Event()
+        self.health_check_thread = None
         self.logger = logging.getLogger("proxy_balancer")
         self._setup_logger()
         algorithm_name = config.get("load_balancing_algorithm", "random")
@@ -189,6 +193,151 @@ class ProxyBalancer:
         self.monitor = ProxyMonitor(self)
         self.monitor.start_monitoring()
         self._run_initial_health_check()
+        self._start_health_check_loop()
+
+    def _start_health_check_loop(self):
+        self.health_check_stop_event.clear()
+        self.health_check_thread = threading.Thread(target=self._health_check_loop, daemon=True)
+        self.health_check_thread.start()
+        self.logger.info("Health check loop started")
+
+    def _health_check_loop(self):
+        health_check_interval = self.config.get("health_check_interval", 30)
+        unavailable_check_interval = max(5, health_check_interval // 6)
+        
+        last_full_check = 0
+        
+        while not self.health_check_stop_event.is_set():
+            current_time = time.time()
+            
+            # Быстрая проверка недоступных прокси
+            if len(self.unavailable_proxies) > 0:
+                self._check_unavailable_proxies()
+            
+            # Полная проверка всех прокси с основным интервалом
+            if current_time - last_full_check >= health_check_interval:
+                self._check_all_proxies()
+                last_full_check = current_time
+            
+            # Ждем меньший интервал для проверки недоступных прокси
+            self.health_check_stop_event.wait(unavailable_check_interval)
+
+    def _check_unavailable_proxies(self):
+        if not self.unavailable_proxies:
+            return
+            
+        proxies_to_check = list(self.unavailable_proxies)
+        self.logger.debug(f"Quick health check for {len(proxies_to_check)} unavailable proxies")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(proxies_to_check), 10)) as executor:
+            future_to_proxy = {
+                executor.submit(self._test_proxy_health, proxy): proxy 
+                for proxy in proxies_to_check
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_proxy, timeout=15):
+                proxy = future_to_proxy[future]
+                try:
+                    is_healthy = future.result()
+                    if is_healthy:
+                        self._restore_proxy(proxy)
+                except Exception as e:
+                    self.logger.debug(f"Health check failed for {ProxyManager.get_proxy_key(proxy)}: {e}")
+
+    def _check_all_proxies(self):
+        all_proxies = self.available_proxies + self.unavailable_proxies
+        if not all_proxies:
+            return
+            
+        self.logger.debug(f"Full health check for {len(all_proxies)} proxies")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(all_proxies), 20)) as executor:
+            future_to_proxy = {
+                executor.submit(self._test_proxy_health, proxy): proxy 
+                for proxy in all_proxies
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_proxy, timeout=30):
+                proxy = future_to_proxy[future]
+                proxy_key = ProxyManager.get_proxy_key(proxy)
+                try:
+                    is_healthy = future.result()
+                    if is_healthy:
+                        if proxy in self.unavailable_proxies:
+                            self._restore_proxy(proxy)
+                    else:
+                        if proxy in self.available_proxies:
+                            self.logger.warning(f"Proxy {proxy_key} failed health check")
+                            self._mark_proxy_unhealthy(proxy)
+                except Exception as e:
+                    self.logger.debug(f"Health check failed for {proxy_key}: {e}")
+                    if proxy in self.available_proxies:
+                        self._mark_proxy_unhealthy(proxy)
+
+    def _test_proxy_health(self, proxy: Dict[str, Any]) -> bool:
+        try:
+            # Создаем тестовое соединение через SOCKS5
+            sock = socks.socksocket()
+            sock.set_proxy(
+                proxy_type=socks.SOCKS5,
+                addr=proxy["host"],
+                port=proxy["port"],
+                username=proxy.get("username"),
+                password=proxy.get("password"),
+            )
+            sock.settimeout(5)
+            
+            # Пробуем подключиться к тестовому серверу
+            test_hosts = [
+                ("httpbin.org", 80),
+                ("google.com", 80),
+                ("cloudflare.com", 80)
+            ]
+            
+            for host, port in test_hosts:
+                try:
+                    sock.connect((host, port))
+                    sock.close()
+                    return True
+                except:
+                    continue
+            
+            sock.close()
+            return False
+            
+        except Exception:
+            return False
+
+    def _restore_proxy(self, proxy: Dict[str, Any]):
+        key = ProxyManager.get_proxy_key(proxy)
+        
+        with self.proxy_selection_lock:
+            if proxy in self.unavailable_proxies:
+                self.unavailable_proxies.remove(proxy)
+                self._unavailable_proxies_set.discard(key)
+                
+                if proxy not in self.available_proxies:
+                    self.available_proxies.append(proxy)
+                    self._available_proxies_set.add(key)
+                    
+                    with self.stats_lock:
+                        self.failure_counts[key] = 0
+                    
+                    self.logger.info(f"Proxy {key} restored to available pool via health check")
+
+    def _mark_proxy_unhealthy(self, proxy: Dict[str, Any]):
+        key = ProxyManager.get_proxy_key(proxy)
+        
+        with self.proxy_selection_lock:
+            if proxy in self.available_proxies:
+                self.available_proxies.remove(proxy)
+                self._available_proxies_set.discard(key)
+                
+                if proxy not in self.unavailable_proxies:
+                    self.unavailable_proxies.append(proxy)
+                    self._unavailable_proxies_set.add(key)
+                    
+                    self.logger.warning(f"Proxy {key} marked as unhealthy via health check")
 
     def _run_initial_health_check(self):
         proxies = self.config.get("proxies", [])
@@ -199,12 +348,19 @@ class ProxyBalancer:
                 self.available_proxies.append(proxy)
 
     def stop(self):
+        self.health_check_stop_event.set()
+        if self.health_check_thread:
+            self.health_check_thread.join(timeout=5)
+            
         if self.server:
             self.server.shutdown()
             self.server.server_close()
             if hasattr(self, 'server_thread'):
                 self.server_thread.join(timeout=5)
             self.logger.info("ProxyBalancer server stopped")
+
+        if hasattr(self, 'monitor') and self.monitor:
+            self.monitor.stop_monitoring()
 
     def set_config_manager(self, config_manager, on_config_change):
         self._config_manager = config_manager
@@ -252,7 +408,7 @@ class ProxyBalancer:
             session.mount("http://", adapter)
             session.mount("https://", adapter)
             return session
-    
+
     def return_session(self, proxy: Dict[str, Any], session: requests.Session):
         key = ProxyManager.get_proxy_key(proxy)
         with self.session_lock:
@@ -302,7 +458,6 @@ class ProxyBalancer:
                 self.logger.error(f"Proxy {key} marked as unavailable after {failure_count} failures")
 
     def print_stats(self) -> None:
-        """Print comprehensive proxy statistics"""
         stats = self.get_stats()
         
         print("\n" + "="*60)
@@ -328,7 +483,6 @@ class ProxyBalancer:
         print("="*60)
 
     def print_compact_stats(self) -> None:
-        """Print compact proxy statistics for periodic updates"""
         stats = self.get_stats()
         
         print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
@@ -344,13 +498,9 @@ class ProxyBalancer:
         print(" | ".join(proxy_summaries))
 
     def log_stats_summary(self) -> None:
-        """Log a summary of statistics"""
         stats = self.get_stats()
-        self.logger.info(f"Stats summary - Total requests: {stats['total_requests']}, "
-                        f"Success rate: {stats['overall_success_rate']}%, "
-                        f"Available proxies: {stats['available_proxies_count']}")
-        
-        for proxy_key, proxy_stats in stats['proxy_stats'].items():
-            if proxy_stats['requests'] > 0:
-                self.logger.info(f"Proxy {proxy_key}: {proxy_stats['requests']} requests, "
-                               f"{proxy_stats['success_rate']}% success rate, {proxy_stats['status']}")
+        self.logger.info(f"Stats Summary - Requests: {stats['total_requests']}, "
+                        f"Success Rate: {stats['overall_success_rate']}%, "
+                        f"Available Proxies: {stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count']}")
+
+
