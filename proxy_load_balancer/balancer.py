@@ -88,8 +88,9 @@ class Balancer:
 
 
 class ProxyBalancer:
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Dict[str, Any], verbose: bool = False) -> None:
         self.config = config
+        self.verbose = verbose
         self._available_proxies_set: Set[str] = set()
         self._unavailable_proxies_set: Set[str] = set()
         self.available_proxies: List[Dict[str, Any]] = config.get("proxies", [])
@@ -107,6 +108,7 @@ class ProxyBalancer:
         self.session_lock = threading.Lock()
         self.server = None
         self.health_thread = None
+        self.stats_thread = None
         self.stop_event = threading.Event()
         self.health_check_pool = None
         self.health_check_stop_event = threading.Event()
@@ -194,6 +196,7 @@ class ProxyBalancer:
         self.monitor.start_monitoring()
         self._run_initial_health_check()
         self._start_health_check_loop()
+        self._start_stats_monitoring()
 
     def _start_health_check_loop(self):
         self.health_check_stop_event.clear()
@@ -483,6 +486,9 @@ class ProxyBalancer:
         print("="*60)
 
     def print_compact_stats(self) -> None:
+        if not self.verbose:
+            return
+            
         stats = self.get_stats()
         
         print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
@@ -502,5 +508,23 @@ class ProxyBalancer:
         self.logger.info(f"Stats Summary - Requests: {stats['total_requests']}, "
                         f"Success Rate: {stats['overall_success_rate']}%, "
                         f"Available Proxies: {stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count']}")
+    
+    def _start_stats_monitoring(self):
+        if not self.verbose:
+            return
+            
+        self.stats_thread = threading.Thread(target=self._stats_monitoring_loop, daemon=True)
+        self.stats_thread.start()
+        self.logger.info("Statistics monitoring started in verbose mode")
+    
+    def _stats_monitoring_loop(self):
+        stats_interval = self.config.get("stats_interval", 30)  
+        
+        while not self.health_check_stop_event.is_set():
+            self.health_check_stop_event.wait(stats_interval)
+            if not self.health_check_stop_event.is_set():
+                self.print_compact_stats()
+
+
 
 

@@ -21,7 +21,7 @@ def start_balancer(config_file: str, verbose: bool = False):
     try:
         config_manager = ConfigManager(config_file)
         config = config_manager.get_config()
-        balancer = ProxyBalancer(config)
+        balancer = ProxyBalancer(config, verbose=verbose)
 
         def on_config_change(new_config):
             if verbose:
