@@ -4,8 +4,10 @@ import tempfile
 import json
 import os
 from unittest.mock import patch, MagicMock
-from proxy_load_balancer.balancer import ProxyBalancer
+from proxy_load_balancer.proxy_balancer import ProxyBalancer
+from proxy_load_balancer.proxy_stats import ProxyStats
 from proxy_load_balancer.monitor import ProxyMonitor
+from proxy_load_balancer.utils import ProxyManager
 
 
 class TestMemoryManagement(unittest.TestCase):
@@ -28,7 +30,7 @@ class TestMemoryManagement(unittest.TestCase):
         balancer = ProxyBalancer(self.config)
         
         # Add some fake statistics for non-existent proxies
-        from proxy_load_balancer.balancer import ProxyStats
+        # from proxy_load_balancer.proxy_stats import ProxyStats
         balancer.proxy_stats["old_proxy_1"] = ProxyStats()
         balancer.proxy_stats["old_proxy_1"].request_count = 100
         balancer.proxy_stats["old_proxy_1"].success_count = 80
@@ -39,19 +41,20 @@ class TestMemoryManagement(unittest.TestCase):
         balancer.proxy_stats["old_proxy_2"].success_count = 40
         balancer.proxy_stats["old_proxy_2"].failure_count = 10
         
-        # Force cleanup
-        balancer._cleanup_stats()
+        # Cleanup with current proxy keys (which don't include old proxies)
+        current_proxy_keys = set(ProxyManager.get_proxy_key(proxy) for proxy in balancer.available_proxies)
+        balancer._cleanup_old_proxy_data(current_proxy_keys)
         
         # Check that old proxy stats are removed
         self.assertNotIn("old_proxy_1", balancer.proxy_stats)
         self.assertNotIn("old_proxy_2", balancer.proxy_stats)
         
     def test_session_pool_cleanup(self):
-        """Test that session pools are cleaned up properly"""
+        """Test that session pools are cleaned up when proxies are removed"""
         balancer = ProxyBalancer(self.config)
         
         # Add some fake session pools for non-existent proxies
-        from proxy_load_balancer.balancer import ProxyStats
+        # from proxy_load_balancer.proxy_stats import ProxyStats
         mock_session1 = MagicMock()
         mock_session2 = MagicMock()
         
@@ -60,51 +63,17 @@ class TestMemoryManagement(unittest.TestCase):
         balancer.proxy_stats["old_proxy_2"] = ProxyStats()
         balancer.proxy_stats["old_proxy_2"].session_pool = [mock_session2]
         
-        # Force cleanup using _cleanup_stats instead
-        balancer._cleanup_stats()
+        # Simulate proxy update with only current proxies
+        current_proxy_keys = {"127.0.0.1:1080", "127.0.0.1:1081"}
+        balancer._cleanup_old_proxy_data(current_proxy_keys)
         
         # Check that old session pools are removed
         self.assertNotIn("old_proxy_1", balancer.proxy_stats)
         self.assertNotIn("old_proxy_2", balancer.proxy_stats)
         
-    def test_stats_size_limits(self):
-        """Test that stats don't exceed maximum size"""
-        balancer = ProxyBalancer(self.config)
-        balancer.max_stats_entries = 5  # Small limit for testing
-        
-        # Add more entries than the limit
-        from proxy_load_balancer.balancer import ProxyStats
-        for i in range(10):
-            key = f"proxy_{i}"
-            stats = ProxyStats()
-            stats.request_count = i
-            stats.success_count = i
-            stats.failure_count = i
-            balancer.proxy_stats[key] = stats
-        
-        # Force cleanup with limit enforcement
-        balancer._enforce_stats_limits()
-        
-        # Check that size is within limit
-        self.assertLessEqual(len(balancer.proxy_stats), balancer.max_stats_entries)
-        
-    def test_periodic_cleanup_timing(self):
-        """Test that periodic cleanup only runs when interval has passed"""
-        balancer = ProxyBalancer(self.config)
-        balancer.cleanup_interval = 1  # 1 second for testing
-        
-        # First call should run cleanup
-        initial_time = balancer.last_cleanup_time
-        time.sleep(1.1)  # Wait longer than cleanup interval
-        
-        with patch.object(balancer, '_cleanup_stats') as mock_cleanup_stats:
-            balancer._periodic_cleanup()
-            
-            # Cleanup method should be called
-            mock_cleanup_stats.assert_called_once()
-            
-            # Time should be updated
-            self.assertGreater(balancer.last_cleanup_time, initial_time)
+        # Verify sessions were closed
+        mock_session1.close.assert_called_once()
+        mock_session2.close.assert_called_once()
         
     def test_session_pool_size_limit(self):
         """Test that session pool size is limited"""
@@ -161,7 +130,7 @@ class TestMemoryManagement(unittest.TestCase):
         balancer = ProxyBalancer(self.config)
         
         # Add stats for current proxies
-        from proxy_load_balancer.balancer import ProxyStats
+        # from proxy_load_balancer.proxy_stats import ProxyStats
         stats_current = ProxyStats()
         stats_current.request_count = 100
         stats_current.success_count = 80

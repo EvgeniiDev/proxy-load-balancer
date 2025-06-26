@@ -2,12 +2,14 @@ import collections
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Deque
-from .balancer import ProxyBalancer
+from typing import Any, Dict, List, Deque, TYPE_CHECKING
 from .utils import ProxyManager
 
+if TYPE_CHECKING:
+    from .proxy_balancer import ProxyBalancer
+
 class ProxyMonitor:
-    def __init__(self, balancer: ProxyBalancer, max_history: int = 100):
+    def __init__(self, balancer: 'ProxyBalancer', max_history: int = 100):
         self.balancer = balancer
         self.is_monitoring = False
         self.monitor_thread = None
@@ -93,7 +95,8 @@ class ProxyMonitor:
                     proxy_key = ProxyManager.get_proxy_key(proxy)
                     is_available = proxy in self.balancer.available_proxies
                     with self.balancer.stats_lock:
-                        failures = self.balancer.failure_counts.get(proxy_key, 0)
+                        stats = self.balancer.proxy_stats.get(proxy_key)
+                        failures = stats.failure_count if stats else 0
                     proxy_info = {
                         "host": proxy["host"],
                         "port": proxy["port"],

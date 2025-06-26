@@ -12,6 +12,7 @@ class LoadBalancingAlgorithm(ABC):
     @abstractmethod
     def reset(self) -> None:
         pass
+
 class RandomAlgorithm(LoadBalancingAlgorithm):
     def select_proxy(self, available_proxies: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not available_proxies:
@@ -19,6 +20,7 @@ class RandomAlgorithm(LoadBalancingAlgorithm):
         return random.choice(available_proxies)
     def reset(self) -> None:
         pass
+
 class RoundRobinAlgorithm(LoadBalancingAlgorithm):
     def __init__(self):
         super().__init__()
@@ -35,6 +37,7 @@ class RoundRobinAlgorithm(LoadBalancingAlgorithm):
     def reset(self) -> None:
         with self.lock:
             self.current_index = 0
+            
 class AlgorithmFactory:
     _algorithms = {
         'random': RandomAlgorithm,

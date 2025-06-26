@@ -1,12 +1,13 @@
 import json
 import os
+import socket
+import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from typing import Dict, List, Any, Optional
-import threading
 import requests
-import subprocess
 from tests.mock_socks5_server import MockSocks5ServerManager
 
 
@@ -73,7 +74,6 @@ class BaseLoadBalancerTest(unittest.TestCase):
             
         # Если порт не указан, найдем свободный
         if config['server']['port'] == 0:
-            import socket
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(('127.0.0.1', 0))
                 config['server']['port'] = s.getsockname()[1]

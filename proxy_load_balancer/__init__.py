@@ -1,4 +1,6 @@
-from .balancer import ProxyBalancer
+from .proxy_balancer import ProxyBalancer
+from .balancer import Balancer
+from .proxy_stats import ProxyStats
 from .handler import ProxyHandler
 from .monitor import ProxyMonitor
 from .server import ProxyBalancerServer

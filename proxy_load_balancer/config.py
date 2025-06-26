@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -25,7 +26,6 @@ class ConfigHandler(FileSystemEventHandler):
                 thread.start()
     def _reload_config(self):
         try:
-            import logging
             logger = logging.getLogger("config_handler")
             new_config = load_config(str(self.config_file))
             if self.validate_config(new_config):
@@ -34,7 +34,6 @@ class ConfigHandler(FileSystemEventHandler):
             else:
                 logger.warning(f"Invalid configuration in {self.config_file}, ignoring changes")
         except Exception as e:
-            import logging
             logger = logging.getLogger("config_handler")
             logger.error(f"Error reloading config: {e}")
     def validate_config(self, config: Dict[str, Any]) -> bool:

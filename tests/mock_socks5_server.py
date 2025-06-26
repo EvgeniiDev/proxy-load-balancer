@@ -1,8 +1,10 @@
+import logging
+import select
 import socket
+import struct
 import threading
 import time
 from typing import Dict, List, Optional, Set
-import struct
 
 
 class MockSocks5Server:
@@ -178,7 +180,6 @@ class MockSocks5Server:
                 client_socket.settimeout(30.0)
                 
                 # Простое проксирование данных
-                import select
                 sockets = [client_socket, target_socket]
                 request_processed = False
                 
@@ -223,7 +224,6 @@ class MockSocks5Server:
                 return request_processed
                             
             except Exception as e:
-                import logging
                 logging.error(f"Error connecting to target server {target_ip}:{target_port}: {e}")
                 return False
             finally:
@@ -233,7 +233,6 @@ class MockSocks5Server:
                     pass
                     
         except Exception as e:
-            import logging
             logging.error(f"Error in proxy_data: {e}")
             return False
                 

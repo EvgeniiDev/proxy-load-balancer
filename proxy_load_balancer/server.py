@@ -4,7 +4,8 @@ import threading
 from http.server import HTTPServer
 from typing import TYPE_CHECKING, Any, Optional, Tuple
 if TYPE_CHECKING:
-    from .balancer import ProxyBalancer
+    from .proxy_balancer import ProxyBalancer
+
 class ThreadPoolMixin(socketserver.ThreadingMixIn):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -29,6 +30,7 @@ class ThreadPoolMixin(socketserver.ThreadingMixIn):
         if hasattr(self, '_thread_pool') and self._thread_pool is not None:
             self._thread_pool.shutdown(wait=False)
         super().server_close()
+
 class ProxyBalancerServer(ThreadPoolMixin, HTTPServer):
     def __init__(self, server_address: Tuple[str, int], RequestHandlerClass, **kwargs):
         self.proxy_balancer: Optional["ProxyBalancer"] = None

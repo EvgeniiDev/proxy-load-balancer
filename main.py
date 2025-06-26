@@ -1,7 +1,7 @@
 import argparse
 import sys
 import threading
-from proxy_load_balancer.balancer import ProxyBalancer
+from proxy_load_balancer.proxy_balancer import ProxyBalancer
 from proxy_load_balancer.config import ConfigManager
 
 
