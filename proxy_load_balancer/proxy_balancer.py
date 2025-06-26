@@ -13,7 +13,6 @@ from .utils import ProxyManager
 from .proxy_selector_algo import LoadBalancingAlgorithm, AlgorithmFactory
 from .handler import ProxyHandler
 from .server import ProxyBalancerServer
-from .monitor import ProxyMonitor
 from .stats_reporter import StatsReporter
 
 
@@ -105,8 +104,7 @@ class ProxyBalancer:
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
         self.logger.info(f"ProxyBalancer server started on {host}:{port}")
-        self.monitor = ProxyMonitor(self)
-        self.monitor.start_monitoring()
+        self.stats_reporter.start_monitoring()
         self._run_initial_health_check()
         self._start_health_check_loop()
         self._start_stats_monitoring()
@@ -263,8 +261,7 @@ class ProxyBalancer:
                 self.server_thread.join(timeout=5)
             self.logger.info("ProxyBalancer server stopped")
 
-        if hasattr(self, 'monitor') and self.monitor:
-            self.monitor.stop_monitoring()
+        self.stats_reporter.stop_monitoring()
 
     def set_config_manager(self, config_manager, on_config_change):
         self._config_manager = config_manager

@@ -6,7 +6,7 @@ import os
 from unittest.mock import patch, MagicMock
 from proxy_load_balancer.proxy_balancer import ProxyBalancer
 from proxy_load_balancer.proxy_stats import ProxyStats
-from proxy_load_balancer.monitor import ProxyMonitor
+from proxy_load_balancer.stats_reporter import StatsReporter
 from proxy_load_balancer.utils import ProxyManager
 
 
@@ -99,31 +99,31 @@ class TestMemoryManagement(unittest.TestCase):
         self.assertGreater(closed_sessions, 0)
         
     def test_monitor_cleanup(self):
-        """Test that monitor cleans up old stats"""
+        """Test that stats reporter cleans up old stats"""
         balancer = ProxyBalancer(self.config)
-        monitor = ProxyMonitor(balancer)
-        monitor.cleanup_interval = 1  # 1 second for testing
+        stats_reporter = balancer.stats_reporter
+        stats_reporter.cleanup_interval = 1  # 1 second for testing
         
         # Add old stats
         old_time = time.time() - 1000  # Very old timestamp
-        monitor.proxy_stats["old_proxy"] = {
+        stats_reporter.proxy_stats["old_proxy"] = {
             "last_update": old_time,
             "requests": 100
         }
         
         # Add recent stats
         recent_time = time.time()
-        monitor.proxy_stats["recent_proxy"] = {
+        stats_reporter.proxy_stats["recent_proxy"] = {
             "last_update": recent_time,
             "requests": 50
         }
         
         # Force cleanup
-        monitor._cleanup_old_proxy_stats()
+        stats_reporter._cleanup_old_proxy_stats()
         
         # Check that old stats are removed but recent ones remain
-        self.assertNotIn("old_proxy", monitor.proxy_stats)
-        self.assertIn("recent_proxy", monitor.proxy_stats)
+        self.assertNotIn("old_proxy", stats_reporter.proxy_stats)
+        self.assertIn("recent_proxy", stats_reporter.proxy_stats)
         
     def test_update_proxies_cleanup(self):
         """Test that updating proxies cleans up old data"""
