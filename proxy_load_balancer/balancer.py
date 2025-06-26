@@ -21,6 +21,59 @@ from .server import ProxyBalancerServer
 from .utils import ProxyManager
 
 
+class ProxyStats:
+    def __init__(self):
+        self.request_count: int = 0
+        self.success_count: int = 0
+        self.failure_count: int = 0
+        self.session_pool: List[requests.Session] = []
+        self.last_used: float = time.time()
+        self.last_success: float = 0
+        self.last_failure: float = 0
+    
+    def increment_requests(self):
+        self.request_count += 1
+        self.last_used = time.time()
+    
+    def increment_successes(self):
+        self.success_count += 1
+        self.failure_count = 0  # Сбрасываем счетчик неудач при успехе
+        self.last_success = time.time()
+        self.last_used = time.time()
+    
+    def increment_failures(self):
+        self.failure_count += 1
+        self.last_failure = time.time()
+        self.last_used = time.time()
+    
+    def get_success_rate(self) -> float:
+        total_operations = self.success_count + self.failure_count
+        if total_operations == 0:
+            return 0.0
+        return (self.success_count / total_operations) * 100
+    
+    def add_session(self, session: requests.Session, max_pool_size: int = 5):
+        if len(self.session_pool) < max_pool_size:
+            self.session_pool.append(session)
+            return True
+        else:
+            session.close()
+            return False
+    
+    def get_session(self) -> Optional[requests.Session]:
+        if self.session_pool:
+            return self.session_pool.pop()
+        return None
+    
+    def close_all_sessions(self):
+        for session in self.session_pool:
+            session.close()
+        self.session_pool.clear()
+    
+    def is_stale(self, max_age: float) -> bool:
+        return time.time() - self.last_used > max_age
+
+
 class Balancer:
     def __init__(
         self,
@@ -99,13 +152,17 @@ class ProxyBalancer:
             ProxyManager.get_proxy_key(proxy) for proxy in self.available_proxies
         )
         self.sessions: Dict[str, queue.Queue] = {}
-        self.session_pools: Dict[str, List[requests.Session]] = {}
-        self.failure_counts: Dict[str, int] = {}
-        self.request_counts: Dict[str, int] = {}
-        self.success_counts: Dict[str, int] = {}
+        self.proxy_stats: Dict[str, ProxyStats] = {}
         self.stats_lock = threading.Lock()
         self.proxy_selection_lock = threading.Lock()
         self.session_lock = threading.Lock()
+        self.max_stats_entries = 1000
+        self.max_session_pool_size = 5
+        self.cleanup_interval = 300
+        self.last_cleanup_time = time.time()
+        self.max_stats_entries = 1000
+        self.cleanup_interval = 300
+        self.last_cleanup_time = time.time()
         self.server = None
         self.health_thread = None
         self.stats_thread = None
@@ -133,26 +190,21 @@ class ProxyBalancer:
 
     def get_stats(self) -> Dict[str, Any]:
         with self.stats_lock:
-            total_requests = sum(self.request_counts.values())
-            total_successes = sum(self.success_counts.values())
-            total_failures = sum(self.failure_counts.values())
+            total_requests = sum(stats.request_count for stats in self.proxy_stats.values())
+            total_successes = sum(stats.success_count for stats in self.proxy_stats.values())
+            total_failures = sum(stats.failure_count for stats in self.proxy_stats.values())
             
             proxy_stats = {}
-            all_proxy_keys = set(self.request_counts.keys()) | set(self.success_counts.keys()) | set(self.failure_counts.keys())
             
-            for key in all_proxy_keys:
-                requests = self.request_counts.get(key, 0)
-                successes = self.success_counts.get(key, 0)
-                failures = self.failure_counts.get(key, 0)
-                total_operations = successes + failures
-                success_rate = (successes / total_operations * 100) if total_operations > 0 else 0
-                
+            for key, stats in self.proxy_stats.items():
                 proxy_stats[key] = {
-                    "requests": requests,
-                    "successes": successes,
-                    "failures": failures,
-                    "success_rate": round(success_rate, 2),
-                    "status": "available" if key in self._available_proxies_set else "unavailable"
+                    "requests": stats.request_count,
+                    "successes": stats.success_count,
+                    "failures": stats.failure_count,
+                    "success_rate": round(stats.get_success_rate(), 2),
+                    "status": "available" if key in self._available_proxies_set else "unavailable",
+                    "last_used": stats.last_used,
+                    "sessions_pooled": len(stats.session_pool)
                 }
             
             return {
@@ -168,10 +220,16 @@ class ProxyBalancer:
 
     def update_proxies(self, new_config: Dict[str, Any]):
         self.config = new_config
-        self.available_proxies = new_config.get("proxies", [])
-        self._available_proxies_set = set(
-            ProxyManager.get_proxy_key(proxy) for proxy in self.available_proxies
-        )
+        new_proxies = new_config.get("proxies", [])
+        new_proxy_keys = set(ProxyManager.get_proxy_key(proxy) for proxy in new_proxies)
+        
+        with self.proxy_selection_lock:
+            self.available_proxies = new_proxies
+            self._available_proxies_set = new_proxy_keys
+            self.unavailable_proxies = []
+            self._unavailable_proxies_set = set()
+        
+        self._cleanup_old_proxy_data(new_proxy_keys)
 
     def reload_algorithm(self):
         algorithm_name = self.config.get("load_balancing_algorithm", "random")
@@ -324,7 +382,8 @@ class ProxyBalancer:
                     self._available_proxies_set.add(key)
                     
                     with self.stats_lock:
-                        self.failure_counts[key] = 0
+                        stats = self._get_or_create_proxy_stats(key)
+                        stats.failure_count = 0
                     
                     self.logger.info(f"Proxy {key} restored to available pool via health check")
 
@@ -370,25 +429,29 @@ class ProxyBalancer:
         self._on_config_change = on_config_change
 
     def get_next_proxy(self) -> Optional[Dict[str, Any]]:
+        self._periodic_cleanup()
+        
         with self.proxy_selection_lock:
             proxy = self.load_balancer.select_proxy(self.available_proxies)
             if proxy:
                 key = ProxyManager.get_proxy_key(proxy)
                 with self.stats_lock:
-                    self.request_counts[key] = self.request_counts.get(key, 0) + 1
-                self.logger.debug(f"Selected proxy {key} (request #{self.request_counts[key]})")
+                    stats = self._get_or_create_proxy_stats(key)
+                    stats.increment_requests()
+                self.logger.debug(f"Selected proxy {key} (request #{stats.request_count})")
             return proxy
 
     def get_session(self, proxy: Dict[str, Any]) -> requests.Session:
         key = ProxyManager.get_proxy_key(proxy)
         
         with self.session_lock:
-            if key not in self.session_pools:
-                self.session_pools[key] = []
+            stats = self._get_or_create_proxy_stats(key)
+            session = stats.get_session()
             
-            if self.session_pools[key]:
-                return self.session_pools[key].pop()
+            if session:
+                return session
             
+            # Создаем новую сессию
             session = requests.Session()
             session.proxies = {
                 "http": f"socks5://{proxy['host']}:{proxy['port']}",
@@ -415,18 +478,14 @@ class ProxyBalancer:
     def return_session(self, proxy: Dict[str, Any], session: requests.Session):
         key = ProxyManager.get_proxy_key(proxy)
         with self.session_lock:
-            if key not in self.session_pools:
-                self.session_pools[key] = []
-            if len(self.session_pools[key]) < 5:
-                self.session_pools[key].append(session)
-            else:
-                session.close()
+            stats = self._get_or_create_proxy_stats(key)
+            stats.add_session(session, self.max_session_pool_size)
 
     def mark_success(self, proxy: Dict[str, Any]):
         key = ProxyManager.get_proxy_key(proxy)
         with self.stats_lock:
-            self.failure_counts[key] = 0
-            self.success_counts[key] = self.success_counts.get(key, 0) + 1
+            stats = self._get_or_create_proxy_stats(key)
+            stats.increment_successes()
             
         with self.proxy_selection_lock:
             self._available_proxies_set.add(key)
@@ -438,13 +497,14 @@ class ProxyBalancer:
             
             self.unavailable_proxies = [p for p in self.unavailable_proxies if ProxyManager.get_proxy_key(p) != key]
             
-        self.logger.debug(f"Proxy {key} success (total: {self.success_counts[key]})")
+        self.logger.debug(f"Proxy {key} success (total: {stats.success_count})")
 
     def mark_failure(self, proxy: Dict[str, Any]):
         key = ProxyManager.get_proxy_key(proxy)
         with self.stats_lock:
-            self.failure_counts[key] = self.failure_counts.get(key, 0) + 1
-            failure_count = self.failure_counts[key]
+            stats = self._get_or_create_proxy_stats(key)
+            stats.increment_failures()
+            failure_count = stats.failure_count
         
         self.logger.warning(f"Proxy {key} failed (failure #{failure_count})")
         
@@ -524,6 +584,62 @@ class ProxyBalancer:
             self.health_check_stop_event.wait(stats_interval)
             if not self.health_check_stop_event.is_set():
                 self.print_compact_stats()
+
+    def _cleanup_old_proxy_data(self, current_proxy_keys: Set[str]):
+        with self.stats_lock:
+            orphaned_keys = set(self.proxy_stats.keys()) - current_proxy_keys
+            
+            for key in orphaned_keys:
+                if key in self.proxy_stats:
+                    self.proxy_stats[key].close_all_sessions()
+                    del self.proxy_stats[key]
+
+    def _periodic_cleanup(self):
+        current_time = time.time()
+        if current_time - self.last_cleanup_time >= self.cleanup_interval:
+            self._cleanup_stats()
+            self._cleanup_session_pools()
+            self.last_cleanup_time = current_time
+
+    def _cleanup_stats(self):
+        with self.stats_lock:
+            current_proxy_keys = self._available_proxies_set | self._unavailable_proxies_set
+            orphaned_keys = set(self.proxy_stats.keys()) - current_proxy_keys
+            
+            for key in orphaned_keys:
+                if key in self.proxy_stats:
+                    self.proxy_stats[key].close_all_sessions()
+                    del self.proxy_stats[key]
+            
+            self._enforce_stats_limits()
+
+    def _cleanup_session_pools(self):
+        # Эта функция теперь не нужна, так как сессии хранятся в ProxyStats
+        pass
+
+    def _enforce_stats_limits(self):
+        if len(self.proxy_stats) > self.max_stats_entries:
+            # Удаляем 20% самых старых записей по времени последнего использования
+            sorted_keys = sorted(
+                self.proxy_stats.keys(),
+                key=lambda k: self.proxy_stats[k].last_used
+            )
+            keys_to_remove = sorted_keys[:int(self.max_stats_entries * 0.2)]
+            for key in keys_to_remove:
+                self.proxy_stats[key].close_all_sessions()
+                del self.proxy_stats[key]
+        
+        # Если все еще превышаем лимит, удаляем больше записей
+        while len(self.proxy_stats) > self.max_stats_entries:
+            oldest_key = min(self.proxy_stats.keys(), key=lambda k: self.proxy_stats[k].last_used)
+            self.proxy_stats[oldest_key].close_all_sessions()
+            del self.proxy_stats[oldest_key]
+
+    def _get_or_create_proxy_stats(self, key: str) -> ProxyStats:
+        """Получить существующую или создать новую статистику для прокси"""
+        if key not in self.proxy_stats:
+            self.proxy_stats[key] = ProxyStats()
+        return self.proxy_stats[key]
 
 
 

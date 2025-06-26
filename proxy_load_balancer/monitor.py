@@ -15,6 +15,9 @@ class ProxyMonitor:
         self.stats_history: Deque[Dict[str, Any]] = collections.deque(maxlen=max_history)
         self.proxy_stats: Dict[str, Dict[str, Any]] = {}
         self.stats_lock = threading.RLock()
+        self.max_proxy_stats = 1000
+        self.cleanup_interval = 300
+        self.last_cleanup_time = time.time()
         self.logger = logging.getLogger("proxy_monitor")
         self._setup_logger()
     def _setup_logger(self):
@@ -55,6 +58,7 @@ class ProxyMonitor:
         last_console_stats_time = 0
         while not self.stop_event.wait(interval):
             try:
+                self._periodic_cleanup()
                 self._collect_stats()
                 
                 current_time = time.time()
@@ -114,3 +118,29 @@ class ProxyMonitor:
             }
             self.stats_history.append(snapshot)
             self.logger.debug(f"Stats collected: {len(proxy_stats)} proxies monitored")
+    def _cleanup_old_proxy_stats(self):
+        current_time = time.time()
+        keys_to_remove = []
+        
+        with self.stats_lock:
+            for key, stats in self.proxy_stats.items():
+                if current_time - stats.get('last_update', 0) > self.cleanup_interval * 2:
+                    keys_to_remove.append(key)
+            
+            for key in keys_to_remove:
+                del self.proxy_stats[key]
+            
+            if len(self.proxy_stats) > self.max_proxy_stats:
+                sorted_keys = sorted(
+                    self.proxy_stats.keys(),
+                    key=lambda k: self.proxy_stats[k].get('last_update', 0)
+                )
+                keys_to_remove = sorted_keys[:int(len(self.proxy_stats) * 0.2)]
+                for key in keys_to_remove:
+                    del self.proxy_stats[key]
+
+    def _periodic_cleanup(self):
+        current_time = time.time()
+        if current_time - self.last_cleanup_time >= self.cleanup_interval:
+            self._cleanup_old_proxy_stats()
+            self.last_cleanup_time = current_time
