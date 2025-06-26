@@ -2,7 +2,7 @@ import time
 import logging
 import threading
 import concurrent.futures
-from typing import Dict, List, Any, Optional, Set
+from typing import Dict, List, Any, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -25,10 +25,6 @@ class ProxyBalancer:
         # Управление прокси
         self.available_proxies: List[Dict[str, Any]] = config.get("proxies", [])
         self.unavailable_proxies: List[Dict[str, Any]] = []
-        self._available_proxies_set: Set[str] = set(
-            ProxyManager.get_proxy_key(proxy) for proxy in self.available_proxies
-        )
-        self._unavailable_proxies_set: Set[str] = set()
         
         # Статистика и управление памятью
         self.proxy_stats: Dict[str, ProxyStats] = {}
@@ -79,7 +75,7 @@ class ProxyBalancer:
                     "successes": stats.success_count,
                     "failures": stats.failure_count,
                     "success_rate": round(stats.get_success_rate(), 2),
-                    "status": "available" if key in self._available_proxies_set else "unavailable",
+                    "status": "available" if any(ProxyManager.get_proxy_key(p) == key for p in self.available_proxies) else "unavailable",
                     "sessions_pooled": len(stats.session_pool)
                 }
             
@@ -101,9 +97,7 @@ class ProxyBalancer:
         
         with self.proxy_selection_lock:
             self.available_proxies = new_proxies
-            self._available_proxies_set = new_proxy_keys
             self.unavailable_proxies = []
-            self._unavailable_proxies_set = set()
         
         self._cleanup_old_proxy_data(new_proxy_keys)
 
@@ -248,11 +242,9 @@ class ProxyBalancer:
         with self.proxy_selection_lock:
             if proxy in self.unavailable_proxies:
                 self.unavailable_proxies.remove(proxy)
-                self._unavailable_proxies_set.discard(key)
                 
                 if proxy not in self.available_proxies:
                     self.available_proxies.append(proxy)
-                    self._available_proxies_set.add(key)
                     
                     with self.stats_lock:
                         stats = self._get_or_create_proxy_stats(key)
@@ -266,19 +258,15 @@ class ProxyBalancer:
         with self.proxy_selection_lock:
             if proxy in self.available_proxies:
                 self.available_proxies.remove(proxy)
-                self._available_proxies_set.discard(key)
                 
                 if proxy not in self.unavailable_proxies:
                     self.unavailable_proxies.append(proxy)
-                    self._unavailable_proxies_set.add(key)
                     
                     self.logger.warning(f"Proxy {key} marked as unhealthy via health check")
 
     def _run_initial_health_check(self):
         proxies = self.config.get("proxies", [])
         for proxy in proxies:
-            key = ProxyManager.get_proxy_key(proxy)
-            self._available_proxies_set.add(key)
             if proxy not in self.available_proxies:
                 self.available_proxies.append(proxy)
 
@@ -359,9 +347,6 @@ class ProxyBalancer:
             stats.increment_successes()
             
         with self.proxy_selection_lock:
-            self._available_proxies_set.add(key)
-            self._unavailable_proxies_set.discard(key)
-            
             if proxy not in self.available_proxies:
                 self.available_proxies.append(proxy)
                 self.logger.info(f"Proxy {key} restored to available pool")
@@ -381,9 +366,6 @@ class ProxyBalancer:
         
         if failure_count >= self.config.get("max_retries", 3):
             with self.proxy_selection_lock:
-                self._available_proxies_set.discard(key)
-                self._unavailable_proxies_set.add(key)
-                
                 self.available_proxies = [p for p in self.available_proxies if ProxyManager.get_proxy_key(p) != key]
                 
                 if proxy not in self.unavailable_proxies:
@@ -456,7 +438,7 @@ class ProxyBalancer:
             if not self.health_check_stop_event.is_set():
                 self.print_compact_stats()
 
-    def _cleanup_old_proxy_data(self, current_proxy_keys: Set[str]):
+    def _cleanup_old_proxy_data(self, current_proxy_keys: set):
         with self.stats_lock:
             orphaned_keys = set(self.proxy_stats.keys()) - current_proxy_keys
             
