@@ -67,119 +67,109 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error(503, "No available proxies")
             return
 
-        remote_socket = None
         try:
-            dest_host, dest_port_str = self.path.split(":", 1)
-            dest_port = int(dest_port_str)
-
-            remote_socket = socks.socksocket()
-            remote_socket.set_proxy(
-                proxy_type=socks.SOCKS5,
-                addr=proxy["host"],
-                port=proxy["port"],
-                username=proxy.get("username"),
-                password=proxy.get("password"),
-            )
-
-            remote_socket.connect((dest_host, dest_port))
+            dest_host, dest_port = self._parse_connect_destination()
+            remote_socket = self._create_proxy_connection(proxy, dest_host, dest_port)
             balancer.mark_success(proxy)
+            
             self.send_response(200, "Connection Established")
             self.end_headers()
-
-            client_socket = self.connection
-            sockets = [client_socket, remote_socket]
-            while True:
-                readable, _, exceptional = select.select(sockets, [], sockets, 60)
-                if exceptional:
-                    break
-                if not readable:
-                    break
-
-                for s in readable:
-                    try:
-                        data = s.recv(8192)
-                        if not data:
-                            sockets.remove(s)
-                            if s is client_socket:
-                                if remote_socket in sockets:
-                                    sockets.remove(remote_socket)
-                                    try:
-                                        remote_socket.close()
-                                    except:
-                                        pass
-                            else:
-                                if client_socket in sockets:
-                                    sockets.remove(client_socket)
-                                    try:
-                                        client_socket.close()
-                                    except:
-                                        pass
-                            if not sockets:
-                                break
-                            continue
-
-                        if s is client_socket:
-                            try:
-                                remote_socket.sendall(data)
-                            except (ConnectionResetError, BrokenPipeError):
-                                # Remote connection lost, remove it
-                                if remote_socket in sockets:
-                                    sockets.remove(remote_socket)
-                                    try:
-                                        remote_socket.close()
-                                    except:
-                                        pass
-                                break
-                        else:
-                            try:
-                                client_socket.sendall(data)
-                            except (ConnectionResetError, BrokenPipeError):
-                                # Client connection lost, remove it
-                                if client_socket in sockets:
-                                    sockets.remove(client_socket)
-                                    try:
-                                        client_socket.close()
-                                    except:
-                                        pass
-                                break
-                    except (ConnectionResetError, BrokenPipeError):
-                        # Connection reset during recv, remove the socket
-                        if s in sockets:
-                            sockets.remove(s)
-                            try:
-                                s.close()
-                            except:
-                                pass
-                        if s is client_socket and remote_socket in sockets:
-                            sockets.remove(remote_socket)
-                            try:
-                                remote_socket.close()
-                            except:
-                                pass
-                        elif s is remote_socket and client_socket in sockets:
-                            sockets.remove(client_socket)
-                            try:
-                                client_socket.close()
-                            except:
-                                pass
-                        break
-                if not sockets:
-                    break
+            
+            self._tunnel_data(self.connection, remote_socket)
+            
         except Exception as e:
             if proxy:
                 balancer.mark_failure(proxy)
-            # Send generic error without revealing proxy usage
-            try:
-                self.send_error(502, "Bad Gateway")
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                # Client connection is already broken, can't send error response
-                pass
+            self._send_error_safely(502, "Bad Gateway")
+
+    def _parse_connect_destination(self):
+        dest_host, dest_port_str = self.path.split(":", 1)
+        dest_port = int(dest_port_str)
+        return dest_host, dest_port
+
+    def _create_proxy_connection(self, proxy, dest_host, dest_port):
+        remote_socket = socks.socksocket()
+        remote_socket.set_proxy(
+            proxy_type=socks.SOCKS5,
+            addr=proxy["host"],
+            port=proxy["port"],
+            username=proxy.get("username"),
+            password=proxy.get("password"),
+        )
+        remote_socket.connect((dest_host, dest_port))
+        return remote_socket
+
+    def _tunnel_data(self, client_socket, remote_socket):
+        sockets = [client_socket, remote_socket]
+        
+        try:
+            while sockets:
+                readable, _, exceptional = select.select(sockets, [], sockets, 60)
+                
+                if exceptional or not readable:
+                    break
+                
+                for socket in readable:
+                    if not self._handle_socket_data(socket, client_socket, remote_socket, sockets):
+                        return
+                        
         finally:
-            if remote_socket:
-                try:
-                    remote_socket.close()
-                except:
-                    pass
+            self._close_socket_safely(remote_socket)
+
+    def _handle_socket_data(self, socket, client_socket, remote_socket, sockets):
+        try:
+            data = socket.recv(8192)
+            if not data:
+                self._remove_socket_and_close_peer(socket, client_socket, remote_socket, sockets)
+                return len(sockets) > 0
+            
+            target_socket = remote_socket if socket is client_socket else client_socket
+            return self._forward_data(data, target_socket, socket, client_socket, remote_socket, sockets)
+            
+        except (ConnectionResetError, BrokenPipeError):
+            self._handle_connection_error(socket, client_socket, remote_socket, sockets)
+            return False
+
+    def _forward_data(self, data, target_socket, source_socket, client_socket, remote_socket, sockets):
+        try:
+            target_socket.sendall(data)
+            return True
+        except (ConnectionResetError, BrokenPipeError):
+            self._remove_socket_safely(target_socket, sockets)
+            return False
+
+    def _remove_socket_and_close_peer(self, socket, client_socket, remote_socket, sockets):
+        self._remove_socket_safely(socket, sockets)
+        
+        if socket is client_socket:
+            self._remove_socket_safely(remote_socket, sockets)
+        else:
+            self._remove_socket_safely(client_socket, sockets)
+
+    def _handle_connection_error(self, socket, client_socket, remote_socket, sockets):
+        self._remove_socket_safely(socket, sockets)
+        
+        if socket is client_socket:
+            self._remove_socket_safely(remote_socket, sockets)
+        elif socket is remote_socket:
+            self._remove_socket_safely(client_socket, sockets)
+
+    def _remove_socket_safely(self, socket, sockets):
+        if socket in sockets:
+            sockets.remove(socket)
+            self._close_socket_safely(socket)
+
+    def _close_socket_safely(self, socket):
+        try:
+            socket.close()
+        except:
+            pass
+
+    def _send_error_safely(self, code, message):
+        try:
+            self.send_error(code, message)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def _handle_request(self):
         balancer = getattr(self.server, "proxy_balancer", None)
