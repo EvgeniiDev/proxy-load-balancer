@@ -93,32 +93,33 @@ class StatsReporter:
 
     def print_stats(self) -> None:
         stats = self.get_stats()
+        total_proxies = stats['available_proxies_count'] + stats['unavailable_proxies_count']
         
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("PROXY LOAD BALANCER STATISTICS")
-        print("="*60)
+        print("="*70)
         print(f"Algorithm: {stats['algorithm']}")
         print(f"Total Requests: {stats['total_requests']}")
         print(f"Total Successes: {stats['total_successes']}")
         print(f"Total Failures: {stats['total_failures']}")
         print(f"Overall Success Rate: {stats['overall_success_rate']}%")
+        print(f"Total Proxies: {total_proxies}")
         print(f"Available Proxies: {stats['available_proxies_count']}")
         print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
         
-        print("\nPER-PROXY STATISTICS:")
-        print("-" * 60)
-        print(f"{'Proxy':<20} {'Requests':<10} {'Success':<10} {'Failures':<10} {'Rate':<8} {'Status':<12}")
-        print("-" * 60)
+        print(f"\nPER-PROXY STATISTICS ({len(stats['proxy_stats'])} proxies):")
+        print("-" * 70)
+        print(f"{'Proxy':<25} {'Requests':<10} {'Success':<10} {'Failures':<10} {'Rate':<8} {'Status':<12}")
+        print("-" * 70)
         
-        # Sort proxies by status (available first, then unavailable)
         sorted_proxies = sorted(stats['proxy_stats'].items(), 
                                key=lambda x: (x[1]['status'] == 'unavailable', x[0]))
         
         for proxy_key, proxy_stats in sorted_proxies:
-            print(f"{proxy_key:<20} {proxy_stats['requests']:<10} {proxy_stats['successes']:<10} "
+            print(f"{proxy_key:<25} {proxy_stats['requests']:<10} {proxy_stats['successes']:<10} "
                   f"{proxy_stats['failures']:<10} {proxy_stats['success_rate']:<7}% {proxy_stats['status']:<12}")
         
-        print("="*60)
+        print("="*70)
 
     def print_compact_stats(self) -> None:
         if not self.proxy_balancer.verbose:
@@ -128,10 +129,15 @@ class StatsReporter:
         
         print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
               f"{stats['overall_success_rate']}% success, "
-              f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count']} proxies up | ", end="")
+              f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count']} proxies up")
         
+        print("Proxies: ", end="")
         proxy_summaries = []
-        for proxy_key, proxy_stats in stats['proxy_stats'].items():
+        
+        sorted_proxies = sorted(stats['proxy_stats'].items(), 
+                               key=lambda x: (x[1]['status'] == 'unavailable', x[0]))
+        
+        for proxy_key, proxy_stats in sorted_proxies:
             status_symbol = "✓" if proxy_stats['status'] == "available" else "✗"
             if proxy_stats['requests'] > 0:
                 proxy_summaries.append(f"{proxy_key}({proxy_stats['requests']}r/{proxy_stats['success_rate']}%{status_symbol})")
