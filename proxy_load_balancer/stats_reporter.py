@@ -43,6 +43,7 @@ class StatsReporter:
             
             proxy_stats = {}
             
+            # Add stats for proxies that have been used
             for key, stats in self.proxy_balancer.proxy_stats.items():
                 proxy_stats[key] = {
                     "requests": stats.request_count,
@@ -52,6 +53,32 @@ class StatsReporter:
                     "status": "available" if any(ProxyManager.get_proxy_key(p) == key for p in self.proxy_balancer.available_proxies) else "unavailable",
                     "sessions_pooled": len(stats.session_pool)
                 }
+            
+            # Add stats for all available proxies that haven't been used yet
+            for proxy in self.proxy_balancer.available_proxies:
+                key = ProxyManager.get_proxy_key(proxy)
+                if key not in proxy_stats:
+                    proxy_stats[key] = {
+                        "requests": 0,
+                        "successes": 0,
+                        "failures": 0,
+                        "success_rate": 0.0,
+                        "status": "available",
+                        "sessions_pooled": 0
+                    }
+            
+            # Add stats for all unavailable proxies that haven't been used yet
+            for proxy in self.proxy_balancer.unavailable_proxies:
+                key = ProxyManager.get_proxy_key(proxy)
+                if key not in proxy_stats:
+                    proxy_stats[key] = {
+                        "requests": 0,
+                        "successes": 0,
+                        "failures": 0,
+                        "success_rate": 0.0,
+                        "status": "unavailable",
+                        "sessions_pooled": 0
+                    }
             
             return {
                 "total_requests": total_requests,
@@ -83,7 +110,11 @@ class StatsReporter:
         print(f"{'Proxy':<20} {'Requests':<10} {'Success':<10} {'Failures':<10} {'Rate':<8} {'Status':<12}")
         print("-" * 60)
         
-        for proxy_key, proxy_stats in stats['proxy_stats'].items():
+        # Sort proxies by status (available first, then unavailable)
+        sorted_proxies = sorted(stats['proxy_stats'].items(), 
+                               key=lambda x: (x[1]['status'] == 'unavailable', x[0]))
+        
+        for proxy_key, proxy_stats in sorted_proxies:
             print(f"{proxy_key:<20} {proxy_stats['requests']:<10} {proxy_stats['successes']:<10} "
                   f"{proxy_stats['failures']:<10} {proxy_stats['success_rate']:<7}% {proxy_stats['status']:<12}")
         
@@ -101,9 +132,11 @@ class StatsReporter:
         
         proxy_summaries = []
         for proxy_key, proxy_stats in stats['proxy_stats'].items():
+            status_symbol = "✓" if proxy_stats['status'] == "available" else "✗"
             if proxy_stats['requests'] > 0:
-                status_symbol = "✓" if proxy_stats['status'] == "available" else "✗"
                 proxy_summaries.append(f"{proxy_key}({proxy_stats['requests']}r/{proxy_stats['success_rate']}%{status_symbol})")
+            else:
+                proxy_summaries.append(f"{proxy_key}(0r{status_symbol})")
         
         print(" | ".join(proxy_summaries))
 
@@ -247,3 +280,125 @@ class StatsReporter:
     def get_stats_history(self) -> List[Dict[str, Any]]:
         with self.stats_lock:
             return list(self.stats_history)
+
+    def get_proxy_stats(self, proxy_key: str) -> Dict[str, Any]:
+        """
+        Get detailed statistics for a specific proxy.
+        
+        Args:
+            proxy_key: The proxy key (e.g., "host:port")
+            
+        Returns:
+            Dictionary with proxy statistics or None if proxy not found
+        """
+        with self.proxy_balancer.stats_lock:
+            # Check if proxy exists in available or unavailable lists
+            all_proxies = self.proxy_balancer.available_proxies + self.proxy_balancer.unavailable_proxies
+            proxy_exists = any(ProxyManager.get_proxy_key(p) == proxy_key for p in all_proxies)
+            
+            if not proxy_exists:
+                return {"error": f"Proxy '{proxy_key}' not found"}
+            
+            # Determine proxy status
+            is_available = any(ProxyManager.get_proxy_key(p) == proxy_key for p in self.proxy_balancer.available_proxies)
+            status = "available" if is_available else "unavailable"
+            
+            # Get stats from proxy_stats if it has been used
+            if proxy_key in self.proxy_balancer.proxy_stats:
+                stats = self.proxy_balancer.proxy_stats[proxy_key]
+                return {
+                    "proxy_key": proxy_key,
+                    "status": status,
+                    "requests": stats.request_count,
+                    "successes": stats.success_count,
+                    "failures": stats.failure_count,
+                    "success_rate": round(stats.get_success_rate(), 2),
+                    "sessions_pooled": len(stats.session_pool),
+                    "has_been_used": True
+                }
+            else:
+                # Proxy exists but has never been used
+                return {
+                    "proxy_key": proxy_key,
+                    "status": status,
+                    "requests": 0,
+                    "successes": 0,
+                    "failures": 0,
+                    "success_rate": 0.0,
+                    "sessions_pooled": 0,
+                    "has_been_used": False
+                }
+
+    def get_all_proxy_keys(self) -> List[str]:
+        """
+        Get list of all proxy keys (both available and unavailable).
+        
+        Returns:
+            List of proxy keys in format "host:port"
+        """
+        with self.proxy_balancer.stats_lock:
+            all_proxies = self.proxy_balancer.available_proxies + self.proxy_balancer.unavailable_proxies
+            return [ProxyManager.get_proxy_key(proxy) for proxy in all_proxies]
+
+    def get_proxy_summary(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get a summary of all proxies with their basic stats.
+        
+        Returns:
+            Dictionary with proxy_key as key and basic stats as value
+        """
+        summary = {}
+        all_keys = self.get_all_proxy_keys()
+        
+        for proxy_key in all_keys:
+            summary[proxy_key] = self.get_proxy_stats(proxy_key)
+            
+        return summary
+
+    def get_proxies_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """
+        Get all proxies filtered by status.
+        
+        Args:
+            status: "available" or "unavailable"
+            
+        Returns:
+            List of proxy statistics for proxies with the specified status
+        """
+        if status not in ["available", "unavailable"]:
+            return []
+            
+        result = []
+        all_keys = self.get_all_proxy_keys()
+        
+        for proxy_key in all_keys:
+            proxy_stats = self.get_proxy_stats(proxy_key)
+            if proxy_stats.get("status") == status:
+                result.append(proxy_stats)
+                
+        return result
+
+    def print_proxy_stats(self, proxy_key: str) -> None:
+        """
+        Print detailed statistics for a specific proxy.
+        
+        Args:
+            proxy_key: The proxy key (e.g., "host:port")
+        """
+        stats = self.get_proxy_stats(proxy_key)
+        
+        if "error" in stats:
+            print(f"Error: {stats['error']}")
+            return
+            
+        print(f"\n{'='*50}")
+        print(f"STATISTICS FOR PROXY: {proxy_key}")
+        print(f"{'='*50}")
+        print(f"Status: {stats['status'].upper()}")
+        print(f"Has been used: {'Yes' if stats['has_been_used'] else 'No'}")
+        print(f"Total Requests: {stats['requests']}")
+        print(f"Successful Requests: {stats['successes']}")
+        print(f"Failed Requests: {stats['failures']}")
+        print(f"Success Rate: {stats['success_rate']}%")
+        print(f"Sessions in Pool: {stats['sessions_pooled']}")
+        print(f"{'='*50}")

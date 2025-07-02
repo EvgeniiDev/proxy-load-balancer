@@ -214,3 +214,168 @@ except KeyboardInterrupt:
 3. При сбое прокси он немедленно исключается из ротации
 4. Неработающие прокси периодически проверяются и восстанавливаются
 5. Ведется статистика по каждому прокси и общая статистика балансировщика
+
+### 📋 Программное использование StatsReporter
+
+Класс `StatsReporter` предоставляет удобный API для получения детальной статистики о работе прокси. Вы можете использовать его для интеграции с системами мониторинга, создания дашбордов или автоматизации управления прокси.
+
+#### Получение общей статистики:
+
+```python
+from proxy_load_balancer.proxy_balancer import ProxyBalancer
+
+# Создание балансировщика
+config = {
+    "proxies": [
+        {"host": "proxy1.example.com", "port": 8080, "type": "socks5"},
+        {"host": "proxy2.example.com", "port": 8080, "type": "socks5"}
+    ],
+    "load_balancing_algorithm": "round_robin"
+}
+
+balancer = ProxyBalancer(config)
+
+# Получение общей статистики
+stats = balancer.stats_reporter.get_stats()
+print(f"Всего запросов: {stats['total_requests']}")
+print(f"Процент успеха: {stats['overall_success_rate']}%")
+print(f"Доступных прокси: {stats['available_proxies_count']}")
+print(f"Недоступных прокси: {stats['unavailable_proxies_count']}")
+
+# Вывод красиво отформатированной статистики
+balancer.stats_reporter.print_stats()
+```
+
+#### Работа с отдельными прокси:
+
+```python
+# Получение списка всех прокси
+all_proxies = balancer.stats_reporter.get_all_proxy_keys()
+print(f"Все прокси: {all_proxies}")
+
+# Получение статистики конкретного прокси
+proxy_key = "proxy1.example.com:8080"
+proxy_stats = balancer.stats_reporter.get_proxy_stats(proxy_key)
+
+if "error" not in proxy_stats:
+    print(f"Прокси: {proxy_stats['proxy_key']}")
+    print(f"Статус: {proxy_stats['status']}")
+    print(f"Запросов: {proxy_stats['requests']}")
+    print(f"Успешных: {proxy_stats['successes']}")
+    print(f"Неудачных: {proxy_stats['failures']}")
+    print(f"Процент успеха: {proxy_stats['success_rate']}%")
+    print(f"Использовался: {'Да' if proxy_stats['has_been_used'] else 'Нет'}")
+
+# Красивый вывод статистики отдельного прокси
+balancer.stats_reporter.print_proxy_stats(proxy_key)
+```
+
+#### Фильтрация прокси по статусу:
+
+```python
+# Получение только доступных прокси
+available_proxies = balancer.stats_reporter.get_proxies_by_status("available")
+print(f"Доступных прокси: {len(available_proxies)}")
+
+for proxy in available_proxies:
+    print(f"  - {proxy['proxy_key']}: {proxy['requests']} запросов")
+
+# Получение недоступных прокси
+unavailable_proxies = balancer.stats_reporter.get_proxies_by_status("unavailable")
+print(f"Недоступных прокси: {len(unavailable_proxies)}")
+
+for proxy in unavailable_proxies:
+    print(f"  - {proxy['proxy_key']}: {proxy['requests']} запросов")
+```
+
+#### Сводка по всем прокси:
+
+```python
+# Получение сводки по всем прокси
+summary = balancer.stats_reporter.get_proxy_summary()
+
+for proxy_key, stats in summary.items():
+    status_icon = "✓" if stats['status'] == 'available' else "✗"
+    print(f"{proxy_key} {status_icon} - {stats['requests']} запросов, "
+          f"{stats['success_rate']}% успеха")
+```
+
+#### Доступные методы StatsReporter:
+
+| Метод | Описание | Возвращает |
+|-------|----------|------------|
+| `get_stats()` | Общая статистика балансировщика | `Dict[str, Any]` |
+| `get_proxy_stats(proxy_key)` | Статистика конкретного прокси | `Dict[str, Any]` |
+| `get_all_proxy_keys()` | Список всех ключей прокси | `List[str]` |
+| `get_proxy_summary()` | Сводка по всем прокси | `Dict[str, Dict[str, Any]]` |
+| `get_proxies_by_status(status)` | Прокси с определенным статусом | `List[Dict[str, Any]]` |
+| `print_stats()` | Вывод общей статистики | `None` |
+| `print_proxy_stats(proxy_key)` | Вывод статистики прокси | `None` |
+| `print_compact_stats()` | Краткий вывод статистики | `None` |
+
+#### Структура данных статистики прокси:
+
+```python
+{
+    "proxy_key": "host:port",           # Ключ прокси
+    "status": "available|unavailable",  # Статус прокси
+    "requests": 42,                     # Общее количество запросов
+    "successes": 38,                    # Успешные запросы
+    "failures": 4,                      # Неудачные запросы
+    "success_rate": 90.48,              # Процент успешных запросов
+    "sessions_pooled": 3,               # Количество сессий в пуле
+    "has_been_used": True               # Использовался ли прокси
+}
+```
+
+#### Пример мониторинга в реальном времени:
+
+```python
+import time
+import threading
+
+def monitor_proxies(balancer):
+    """Функция для мониторинга прокси в реальном времени"""
+    while True:
+        stats = balancer.stats_reporter.get_stats()
+        
+        # Проверка наличия недоступных прокси
+        if stats['unavailable_proxies_count'] > 0:
+            unavailable = balancer.stats_reporter.get_proxies_by_status("unavailable")
+            print(f"⚠️  Внимание: {len(unavailable)} прокси недоступны!")
+            for proxy in unavailable:
+                print(f"   - {proxy['proxy_key']}")
+        
+        # Проверка низкого процента успеха
+        if stats['overall_success_rate'] < 80 and stats['total_requests'] > 0:
+            print(f"⚠️  Низкий процент успеха: {stats['overall_success_rate']}%")
+        
+        # Поиск проблемных прокси
+        all_proxies = balancer.stats_reporter.get_proxy_summary()
+        for proxy_key, proxy_stats in all_proxies.items():
+            if (proxy_stats['requests'] > 10 and 
+                proxy_stats['success_rate'] < 50):
+                print(f"🚨 Проблемный прокси {proxy_key}: "
+                      f"{proxy_stats['success_rate']}% успеха")
+        
+        # Краткая статистика каждые 30 секунд
+        balancer.stats_reporter.print_compact_stats()
+        
+        time.sleep(30)
+
+# Запуск балансировщика с мониторингом
+balancer = ProxyBalancer(config, verbose=True)
+balancer.start()
+
+# Запуск мониторинга в отдельном потоке
+monitor_thread = threading.Thread(target=monitor_proxies, args=(balancer,), daemon=True)
+monitor_thread.start()
+
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    balancer.stop()
+```
+
+> **💡 Совет**: Для интеграции с системами мониторинга (Prometheus, Grafana, etc.) используйте методы `get_stats()` и `get_proxy_summary()` для экспорта метрик в нужном формате.
