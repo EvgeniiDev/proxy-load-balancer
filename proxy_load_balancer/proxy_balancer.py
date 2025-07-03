@@ -81,12 +81,17 @@ class ProxyBalancer:
         self.config = new_config
         new_proxies = new_config.get("proxies", [])
         new_proxy_keys = set(ProxyManager.get_proxy_key(proxy) for proxy in new_proxies)
-        
+
+        self.logger.warning(f"Updated proxies before add: {len(self.available_proxies)}")
+
         with self.proxy_selection_lock:
             self.available_proxies = new_proxies
             self.unavailable_proxies = []
-        
+
         self._cleanup_old_proxy_data(new_proxy_keys)
+
+        self.logger.warning(f"Updated proxies after add: {len(self.available_proxies)}")
+
 
     def reload_algorithm(self):
         algorithm_name = self.config.get("load_balancing_algorithm", "random")
