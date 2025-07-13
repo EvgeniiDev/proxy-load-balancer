@@ -30,7 +30,11 @@ class ProxyStats:
             self.session_pool.append(session)
             return True
         else:
-            session.close()
+            # Properly close session to prevent resource leaks
+            try:
+                session.close()
+            except:
+                pass
             return False
     
     def get_session(self) -> Optional[requests.Session]:
@@ -39,6 +43,10 @@ class ProxyStats:
         return None
     
     def close_all_sessions(self):
+        """Properly close all sessions to prevent resource leaks."""
         for session in self.session_pool:
-            session.close()
+            try:
+                session.close()
+            except:
+                pass
         self.session_pool.clear()

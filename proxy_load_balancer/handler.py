@@ -67,6 +67,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error(503, "No available proxies")
             return
 
+        remote_socket = None
         try:
             dest_host, dest_port = self._parse_connect_destination()
             remote_socket = self._create_proxy_connection(proxy, dest_host, dest_port)
@@ -80,6 +81,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             if proxy:
                 balancer.mark_failure(proxy)
+            # Ensure remote socket is closed on error
+            if remote_socket:
+                self._close_socket_safely(remote_socket)
             self._send_error_safely(502, "Bad Gateway")
 
     def _parse_connect_destination(self):
@@ -89,15 +93,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _create_proxy_connection(self, proxy, dest_host, dest_port):
         remote_socket = socks.socksocket()
-        remote_socket.set_proxy(
-            proxy_type=socks.SOCKS5,
-            addr=proxy["host"],
-            port=proxy["port"],
-            username=proxy.get("username"),
-            password=proxy.get("password"),
-        )
-        remote_socket.connect((dest_host, dest_port))
-        return remote_socket
+        try:
+            remote_socket.set_proxy(
+                proxy_type=socks.SOCKS5,
+                addr=proxy["host"],
+                port=proxy["port"],
+                username=proxy.get("username"),
+                password=proxy.get("password"),
+            )
+            # Set timeout to prevent hanging connections
+            remote_socket.settimeout(30)
+            remote_socket.connect((dest_host, dest_port))
+            return remote_socket
+        except Exception:
+            # Close socket if connection failed
+            self._close_socket_safely(remote_socket)
+            raise
 
     def _tunnel_data(self, client_socket, remote_socket):
         sockets = [client_socket, remote_socket]
@@ -205,11 +216,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 url=url,
                 headers=headers,
                 data=body,
-                timeout=balancer.config["connection_timeout"],
+                timeout=timeout,
                 allow_redirects=False,
                 verify=True,
                 stream=True,
             )
+            
             balancer.mark_success(proxy)
             self.send_response(response.status_code)
             
@@ -223,19 +235,31 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.send_header(header, value)
             
             self.end_headers()
-            for chunk in response.iter_content(8192):
-                if chunk:
-                    try:
-                        self.wfile.write(chunk)
-                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                        break
             
+            # Properly handle response streaming with error checking
+            try:
+                for chunk in response.iter_content(8192):
+                    if chunk:
+                        try:
+                            self.wfile.write(chunk)
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                            break
+            finally:
+                # Ensure response is properly closed
+                response.close()
+            
+            # Return session to pool only if everything succeeded
             balancer.return_session(proxy, session)
+            session = None  # Mark as returned to avoid double cleanup
             
         except Exception as e:
             balancer.mark_failure(proxy)
+            # Always close session on error to prevent leaks
             if session:
-                session.close()
+                try:
+                    session.close()
+                except:
+                    pass
             try:
                 self.send_error(502, "Bad Gateway")
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):

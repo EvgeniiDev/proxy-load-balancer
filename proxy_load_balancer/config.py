@@ -22,8 +22,9 @@ class ConfigHandler(FileSystemEventHandler):
             if current_time - self.last_modified > 3:
                 self.last_modified = current_time
                 thread = threading.Thread(target=self._reload_config)
-                thread.daemon = True
+                # Remove daemon=True to ensure proper cleanup
                 thread.start()
+
     def _reload_config(self):
         try:
             logger = logging.getLogger("config_handler")
@@ -36,6 +37,7 @@ class ConfigHandler(FileSystemEventHandler):
         except Exception as e:
             logger = logging.getLogger("config_handler")
             logger.error(f"Error reloading config: {e}")
+
     def validate_config(self, config: Dict[str, Any]) -> bool:
         required_fields = ["server", "proxies", "health_check_interval", "max_retries"]
         for field in required_fields:
@@ -50,14 +52,17 @@ class ConfigHandler(FileSystemEventHandler):
                 print(f"Invalid proxy configuration at index {i}")
                 return False
         return True
+
 class ConfigManager:
     def __init__(self, config_file: str = "config.json"):
         self.config_file = config_file
         self.config = load_config(config_file)
         self.observer = None
         self.callbacks: list[Any] = []
+
     def add_change_callback(self, callback: Callable[[Dict[str, Any]], None]):
         self.callbacks.append(callback)
+
     def start_monitoring(self):
         if self.observer is not None:
             return
@@ -68,12 +73,17 @@ class ConfigManager:
         self.observer.schedule(handler, str(watch_dir), recursive=False)
         self.observer.start()
         print(f"Started monitoring config file: {self.config_file}")
+
     def stop_monitoring(self):
         if self.observer:
+            print("Stopping config monitoring...")
             self.observer.stop()
-            self.observer.join()
+            self.observer.join(timeout=10)
+            if self.observer.is_alive():
+                print("Warning: Config monitoring thread did not stop gracefully")
             self.observer = None
             print("Stopped monitoring config file")
+
     def _on_config_changed(self, new_config: Dict[str, Any]):
         self.config = new_config
         for callback in self.callbacks:
@@ -81,8 +91,10 @@ class ConfigManager:
                 callback(new_config)
             except Exception as e:
                 print(f"Error in config change callback: {e}")
+
     def get_config(self) -> Dict[str, Any]:
         return self.config.copy()
+        
     def reload_config(self):
         try:
             new_config = load_config(self.config_file)

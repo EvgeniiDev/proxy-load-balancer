@@ -41,18 +41,14 @@ class ProxyBalancer:
         self.stats_reporter = StatsReporter(self)
         
         algorithm_name = config.get("load_balancing_algorithm", "random")
-        try:
-            self.load_balancer: LoadBalancingAlgorithm = AlgorithmFactory.create_algorithm(algorithm_name)
-        except ValueError as e:
-            self.logger.error(f"Algorithm initialization error: {e}")
-            self.logger.info("Using default algorithm: random")
-            self.load_balancer = AlgorithmFactory.create_algorithm("random")
+        
+        self.load_balancer: LoadBalancingAlgorithm = AlgorithmFactory.create_algorithm(algorithm_name)
 
     def _setup_logger(self):
         self.logger.setLevel(logging.INFO)
         if not self.logger.handlers:
             handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
 
@@ -106,7 +102,8 @@ class ProxyBalancer:
         port = self.config["server"]["port"]
         self.server = ProxyBalancerServer((host, port), ProxyHandler)
         self.server.proxy_balancer = self
-        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        # Remove daemon=True to ensure proper cleanup
+        self.server_thread = threading.Thread(target=self.server.serve_forever)
         self.server_thread.start()
         self.logger.info(f"ProxyBalancer server started on {host}:{port}")
         self.stats_reporter.start_monitoring()
@@ -116,7 +113,8 @@ class ProxyBalancer:
 
     def _start_health_check_loop(self):
         self.health_check_stop_event.clear()
-        self.health_check_thread = threading.Thread(target=self._health_check_loop, daemon=True)
+        # Remove daemon=True to ensure proper cleanup
+        self.health_check_thread = threading.Thread(target=self._health_check_loop)
         self.health_check_thread.start()
         self.logger.info("Health check loop started")
 
@@ -191,6 +189,7 @@ class ProxyBalancer:
                         self._mark_proxy_unhealthy(proxy)
 
     def _test_proxy_health(self, proxy: Dict[str, Any]) -> bool:
+        sock = None
         try:
             sock = socks.socksocket()
             sock.set_proxy(
@@ -211,16 +210,21 @@ class ProxyBalancer:
             for host, port in test_hosts:
                 try:
                     sock.connect((host, port))
-                    sock.close()
-                    return True
+                    return True  # Return immediately on first success
                 except:
                     continue
             
-            sock.close()
             return False
             
         except Exception:
             return False
+        finally:
+            # Always close socket to prevent leaks
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
 
     def _restore_proxy(self, proxy: Dict[str, Any]):
         key = ProxyManager.get_proxy_key(proxy)
@@ -255,18 +259,40 @@ class ProxyBalancer:
                 self.available_proxies.append(proxy)
 
     def stop(self):
+        self.logger.info("Stopping ProxyBalancer...")
+        
+        # Stop health check thread
         self.health_check_stop_event.set()
-        if self.health_check_thread:
-            self.health_check_thread.join(timeout=5)
+        if self.health_check_thread and self.health_check_thread.is_alive():
+            self.health_check_thread.join(timeout=10)
+            if self.health_check_thread.is_alive():
+                self.logger.warning("Health check thread did not stop gracefully")
+        
+        # Stop stats thread
+        if self.stats_thread and self.stats_thread.is_alive():
+            self.stats_thread.join(timeout=5)
+            if self.stats_thread.is_alive():
+                self.logger.warning("Stats thread did not stop gracefully")
             
+        # Stop server
         if self.server:
             self.server.shutdown()
             self.server.server_close()
-            if hasattr(self, 'server_thread'):
-                self.server_thread.join(timeout=5)
+            if hasattr(self, 'server_thread') and self.server_thread.is_alive():
+                self.server_thread.join(timeout=10)
+                if self.server_thread.is_alive():
+                    self.logger.warning("Server thread did not stop gracefully")
             self.logger.info("ProxyBalancer server stopped")
 
+        # Stop stats reporter
         self.stats_reporter.stop_monitoring()
+        
+        # Clean up all proxy sessions
+        with self.stats_lock:
+            for stats in self.proxy_stats.values():
+                stats.close_all_sessions()
+        
+        self.logger.info("ProxyBalancer stopped completely")
 
     def set_config_manager(self, config_manager, on_config_change):
         self._config_manager = config_manager
@@ -353,7 +379,8 @@ class ProxyBalancer:
         if not self.verbose:
             return
             
-        self.stats_thread = threading.Thread(target=self._stats_monitoring_loop, daemon=True)
+        # Remove daemon=True to ensure proper cleanup
+        self.stats_thread = threading.Thread(target=self._stats_monitoring_loop)
         self.stats_thread.start()
         self.logger.info("Statistics monitoring started in verbose mode")
     

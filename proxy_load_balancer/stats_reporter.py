@@ -158,17 +158,21 @@ class StatsReporter:
             return
         self.is_monitoring = True
         self.stop_event.clear()
-        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        # Remove daemon=True to ensure proper cleanup
+        self.monitor_thread = threading.Thread(target=self._monitor_loop)
         self.monitor_thread.start()
         self.logger.info("Stats monitoring started")
 
     def stop_monitoring(self):
         if not self.is_monitoring:
             return
+        self.logger.info("Stopping stats monitoring...")
         self.is_monitoring = False
         self.stop_event.set()
-        if self.monitor_thread:
-            self.monitor_thread.join(timeout=5)
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=10)
+            if self.monitor_thread.is_alive():
+                self.logger.warning("Stats monitoring thread did not stop gracefully")
         self.logger.info("Stats monitoring stopped")
 
     def _monitor_loop(self):

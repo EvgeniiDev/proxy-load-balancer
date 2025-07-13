@@ -44,9 +44,22 @@ def start_balancer(config_file: str, verbose: bool = False):
         balancer.start()
 
         try:
-            threading.Event().wait()
+            # Use a proper event instead of threading.Event().wait()
+            shutdown_event = threading.Event()
+            
+            def signal_handler(signum, frame):
+                print("\nReceived signal, shutting down...")
+                shutdown_event.set()
+            
+            import signal
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+            
+            shutdown_event.wait()
         except KeyboardInterrupt:
             print("\nShutting down...")
+        finally:
+            print("Stopping services...")
             config_manager.stop_monitoring()
             balancer.stop()
             print("Stopped")
