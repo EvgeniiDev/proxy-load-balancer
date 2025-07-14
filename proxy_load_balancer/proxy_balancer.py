@@ -165,7 +165,7 @@ class ProxyBalancer:
             
         self.logger.debug(f"Full health check for {len(all_proxies)} proxies")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(all_proxies), 20)) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(all_proxies), 10)) as executor:
             future_to_proxy = {
                 executor.submit(self._test_proxy_health, proxy): proxy 
                 for proxy in all_proxies
@@ -181,7 +181,6 @@ class ProxyBalancer:
                             self._restore_proxy(proxy)
                     else:
                         if proxy in self.available_proxies:
-                            self.logger.warning(f"Proxy {proxy_key} failed health check")
                             self._mark_proxy_unhealthy(proxy)
                 except Exception as e:
                     self.logger.debug(f"Health check failed for {proxy_key}: {e}")
@@ -199,7 +198,7 @@ class ProxyBalancer:
                 username=proxy.get("username"),
                 password=proxy.get("password"),
             )
-            sock.settimeout(5)
+            sock.settimeout(30)
             
             test_hosts = [
                 ("httpbin.org", 80),
