@@ -7,6 +7,8 @@ class ProxyStats:
         self.request_count: int = 0
         self.success_count: int = 0
         self.failure_count: int = 0
+        self.overload_count: int = 0
+        self.total_overloads: int = 0
         self.session_pool: List[requests.Session] = []
 
     def increment_requests(self):
@@ -18,6 +20,15 @@ class ProxyStats:
     
     def increment_failures(self):
         self.failure_count += 1
+    
+    def increment_overloads(self):
+        """Увеличивает счетчик перегрузок"""
+        self.overload_count += 1
+        self.total_overloads += 1
+    
+    def reset_overload_count(self):
+        """Сбрасывает счетчик текущих перегрузок"""
+        self.overload_count = 0
     
     def get_success_rate(self) -> float:
         total_operations = self.success_count + self.failure_count

@@ -14,6 +14,8 @@
   "connection_timeout": 30,
   "max_retries": 3,
   "proxy_rest_duration": 30,
+  "overload_adaptive_multiplier": 0.5,
+  "max_overload_multiplier": 3.0,
   "monitoring_interval": 10,
   "stats_log_interval": 60,
   "console_stats_interval": 30,

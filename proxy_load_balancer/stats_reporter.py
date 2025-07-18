@@ -40,6 +40,8 @@ class StatsReporter:
             total_requests = sum(stats.request_count for stats in self.proxy_balancer.proxy_stats.values())
             total_successes = sum(stats.success_count for stats in self.proxy_balancer.proxy_stats.values())
             total_failures = sum(stats.failure_count for stats in self.proxy_balancer.proxy_stats.values())
+            total_overloads = sum(stats.total_overloads for stats in self.proxy_balancer.proxy_stats.values())
+            current_overloads = sum(stats.overload_count for stats in self.proxy_balancer.proxy_stats.values())
             
             proxy_stats = {}
             
@@ -49,6 +51,8 @@ class StatsReporter:
                     "requests": stats.request_count,
                     "successes": stats.success_count,
                     "failures": stats.failure_count,
+                    "overloads": stats.overload_count,
+                    "total_overloads": stats.total_overloads,
                     "success_rate": round(stats.get_success_rate(), 2),
                     "status": "available" if any(ProxyManager.get_proxy_key(p) == key for p in self.proxy_balancer.available_proxies) else "unavailable",
                     "sessions_pooled": len(stats.session_pool)
@@ -62,6 +66,8 @@ class StatsReporter:
                         "requests": 0,
                         "successes": 0,
                         "failures": 0,
+                        "overloads": 0,
+                        "total_overloads": 0,
                         "success_rate": 0.0,
                         "status": "available",
                         "sessions_pooled": 0
@@ -75,6 +81,8 @@ class StatsReporter:
                         "requests": 0,
                         "successes": 0,
                         "failures": 0,
+                        "overloads": 0,
+                        "total_overloads": 0,
                         "success_rate": 0.0,
                         "status": "unavailable",
                         "sessions_pooled": 0
@@ -87,17 +95,25 @@ class StatsReporter:
                         "requests": 0,
                         "successes": 0,
                         "failures": 0,
+                        "overloads": 0,
+                        "total_overloads": 0,
                         "success_rate": 0.0,
                         "status": "resting",
-                        "sessions_pooled": 0
+                        "sessions_pooled": 0,
+                        "rest_reason": rest_info.get("reason", "unknown"),
+                        "rest_until": rest_info.get("rest_until", 0)
                     }
                 else:
                     proxy_stats[key]["status"] = "resting"
+                    proxy_stats[key]["rest_reason"] = rest_info.get("reason", "unknown")
+                    proxy_stats[key]["rest_until"] = rest_info.get("rest_until", 0)
             
             return {
                 "total_requests": total_requests,
                 "total_successes": total_successes,
                 "total_failures": total_failures,
+                "total_overloads": total_overloads,
+                "current_overloads": current_overloads,
                 "overall_success_rate": round((total_successes / (total_successes + total_failures) * 100) if (total_successes + total_failures) > 0 else 0, 2),
                 "available_proxies_count": len(self.proxy_balancer.available_proxies),
                 "unavailable_proxies_count": len(self.proxy_balancer.unavailable_proxies),
@@ -117,14 +133,13 @@ class StatsReporter:
         print(f"Total Requests: {stats['total_requests']}")
         print(f"Total Successes: {stats['total_successes']}")
         print(f"Total Failures: {stats['total_failures']}")
+        print(f"Total Overloads: {stats['total_overloads']}")
+        print(f"Current Overloads: {stats['current_overloads']}")
         print(f"Overall Success Rate: {stats['overall_success_rate']}%")
         print(f"Total Proxies: {total_proxies}")
         print(f"Available Proxies: {stats['available_proxies_count']}")
         print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
         print(f"Resting Proxies: {stats['resting_proxies_count']}")
-        print(f"Total Proxies: {total_proxies}")
-        print(f"Available Proxies: {stats['available_proxies_count']}")
-        print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
         
         print(f"\nPER-PROXY STATISTICS ({len(stats['proxy_stats'])} proxies):")
         print("-" * 70)
@@ -148,6 +163,7 @@ class StatsReporter:
         
         print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
               f"{stats['overall_success_rate']}% success, "
+              f"{stats['total_overloads']} overloads, "
               f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count'] + stats['resting_proxies_count']} proxies up")
         
         print("Proxies: ", end="")
@@ -160,7 +176,11 @@ class StatsReporter:
             if proxy_stats['status'] == "available":
                 status_symbol = "✓"
             elif proxy_stats['status'] == "resting":
-                status_symbol = "💤"
+                rest_reason = proxy_stats.get('rest_reason', 'unknown')
+                if rest_reason == "overloaded":
+                    status_symbol = "🔥"  # Перегруженный прокси
+                else:
+                    status_symbol = "💤"  # Обычный отдых
             else:
                 status_symbol = "✗"
                 
@@ -452,6 +472,19 @@ class StatsReporter:
         print(f"Total Requests: {stats['requests']}")
         print(f"Successful Requests: {stats['successes']}")
         print(f"Failed Requests: {stats['failures']}")
+        print(f"Current Overloads: {stats.get('overloads', 0)}")
+        print(f"Total Overloads: {stats.get('total_overloads', 0)}")
         print(f"Success Rate: {stats['success_rate']}%")
         print(f"Sessions in Pool: {stats['sessions_pooled']}")
+        
+        # Добавляем информацию о времени отдыха для отдыхающих прокси
+        if stats['status'] == 'resting':
+            rest_until = stats.get('rest_until', 0)
+            rest_reason = stats.get('rest_reason', 'unknown')
+            if rest_until > 0:
+                import time
+                remaining_time = max(0, int(rest_until - time.time()))
+                print(f"Rest Reason: {rest_reason}")
+                print(f"Rest Time Remaining: {remaining_time} seconds")
+        
         print(f"{'='*50}")
