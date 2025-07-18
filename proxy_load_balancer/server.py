@@ -12,7 +12,7 @@ class ThreadPoolMixin(socketserver.ThreadingMixIn):
         # Reduce max workers significantly to prevent thread explosion
         self._thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=250,
-            thread_name_prefix="proxy_server_worker"
+            thread_name_prefix="ProxyWorker"
         )
         self._shutdown_event = threading.Event()
     
@@ -21,7 +21,7 @@ class ThreadPoolMixin(socketserver.ThreadingMixIn):
         if not hasattr(self, '_thread_pool') or self._thread_pool is None:
             self._thread_pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=250,
-                thread_name_prefix="proxy_server_worker"
+                thread_name_prefix="ProxyWorker"
             )
     
     def process_request(self, request, client_address):

@@ -21,7 +21,10 @@ class ConfigHandler(FileSystemEventHandler):
             current_time = time.time()
             if current_time - self.last_modified > 3:
                 self.last_modified = current_time
-                thread = threading.Thread(target=self._reload_config)
+                thread = threading.Thread(
+                    target=self._reload_config,
+                    name="ConfigReloader"
+                )
                 # Remove daemon=True to ensure proper cleanup
                 thread.start()
 

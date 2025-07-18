@@ -16,6 +16,20 @@ from .server import ProxyBalancerServer
 from .stats_reporter import StatsReporter
 
 
+def _create_named_thread_pool_executor(max_workers, name_prefix):
+    """Создает ThreadPoolExecutor с именованными потоками."""
+    class NamedThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, max_workers=None, thread_name_prefix=None):
+            super().__init__(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
+    
+    return NamedThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=name_prefix)
+
+
+def _set_thread_name(name):
+    """Устанавливает имя текущего потока для лучшей идентификации в системе."""
+    threading.current_thread().name = name
+
+
 class ProxyBalancer:
     def __init__(self, config: Dict[str, Any], verbose: bool = False) -> None:
         self.config = config
@@ -103,7 +117,10 @@ class ProxyBalancer:
         self.server = ProxyBalancerServer((host, port), ProxyHandler)
         self.server.proxy_balancer = self
         # Remove daemon=True to ensure proper cleanup
-        self.server_thread = threading.Thread(target=self.server.serve_forever)
+        self.server_thread = threading.Thread(
+            target=self.server.serve_forever,
+            name="ProxyBalancer-Server"
+        )
         self.server_thread.start()
         self.logger.info(f"ProxyBalancer server started on {host}:{port}")
         self.stats_reporter.start_monitoring()
@@ -114,11 +131,15 @@ class ProxyBalancer:
     def _start_health_check_loop(self):
         self.health_check_stop_event.clear()
         # Remove daemon=True to ensure proper cleanup
-        self.health_check_thread = threading.Thread(target=self._health_check_loop)
+        self.health_check_thread = threading.Thread(
+            target=self._health_check_loop,
+            name="ProxyBalancer-HealthCheck"
+        )
         self.health_check_thread.start()
         self.logger.info("Health check loop started")
 
     def _health_check_loop(self):
+        _set_thread_name("HealthCheck-Main")
         health_check_interval = self.config.get("health_check_interval", 30)
         unavailable_check_interval = max(5, health_check_interval // 6)
         
@@ -143,7 +164,10 @@ class ProxyBalancer:
         proxies_to_check = list(self.unavailable_proxies)
         self.logger.debug(f"Quick health check for {len(proxies_to_check)} unavailable proxies")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(proxies_to_check), 10)) as executor:
+        with _create_named_thread_pool_executor(
+            max_workers=min(len(proxies_to_check), 10),
+            name_prefix="HealthCheck-Quick"
+        ) as executor:
             future_to_proxy = {
                 executor.submit(self._test_proxy_health, proxy): proxy 
                 for proxy in proxies_to_check
@@ -165,7 +189,10 @@ class ProxyBalancer:
             
         self.logger.debug(f"Full health check for {len(all_proxies)} proxies")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(all_proxies), 10)) as executor:
+        with _create_named_thread_pool_executor(
+            max_workers=min(len(all_proxies), 10),
+            name_prefix="HealthCheck-Full"
+        ) as executor:
             future_to_proxy = {
                 executor.submit(self._test_proxy_health, proxy): proxy 
                 for proxy in all_proxies
@@ -379,7 +406,10 @@ class ProxyBalancer:
             return
             
         # Remove daemon=True to ensure proper cleanup
-        self.stats_thread = threading.Thread(target=self._stats_monitoring_loop)
+        self.stats_thread = threading.Thread(
+            target=self._stats_monitoring_loop,
+            name="ProxyBalancer-Stats"
+        )
         self.stats_thread.start()
         self.logger.info("Statistics monitoring started in verbose mode")
     

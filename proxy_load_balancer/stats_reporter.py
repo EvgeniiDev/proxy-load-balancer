@@ -159,7 +159,10 @@ class StatsReporter:
         self.is_monitoring = True
         self.stop_event.clear()
         # Remove daemon=True to ensure proper cleanup
-        self.monitor_thread = threading.Thread(target=self._monitor_loop)
+        self.monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            name="StatsReporter-Monitor"
+        )
         self.monitor_thread.start()
         self.logger.info("Stats monitoring started")
 
