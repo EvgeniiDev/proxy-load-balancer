@@ -80,6 +80,20 @@ class StatsReporter:
                         "sessions_pooled": 0
                     }
             
+            # Add stats for all resting proxies
+            for key, rest_info in self.proxy_balancer.resting_proxies.items():
+                if key not in proxy_stats:
+                    proxy_stats[key] = {
+                        "requests": 0,
+                        "successes": 0,
+                        "failures": 0,
+                        "success_rate": 0.0,
+                        "status": "resting",
+                        "sessions_pooled": 0
+                    }
+                else:
+                    proxy_stats[key]["status"] = "resting"
+            
             return {
                 "total_requests": total_requests,
                 "total_successes": total_successes,
@@ -87,13 +101,14 @@ class StatsReporter:
                 "overall_success_rate": round((total_successes / (total_successes + total_failures) * 100) if (total_successes + total_failures) > 0 else 0, 2),
                 "available_proxies_count": len(self.proxy_balancer.available_proxies),
                 "unavailable_proxies_count": len(self.proxy_balancer.unavailable_proxies),
+                "resting_proxies_count": len(self.proxy_balancer.resting_proxies),
                 "algorithm": type(self.proxy_balancer.load_balancer).__name__,
                 "proxy_stats": proxy_stats
             }
 
     def print_stats(self) -> None:
         stats = self.get_stats()
-        total_proxies = stats['available_proxies_count'] + stats['unavailable_proxies_count']
+        total_proxies = stats['available_proxies_count'] + stats['unavailable_proxies_count'] + stats['resting_proxies_count']
         
         print("\n" + "="*70)
         print("PROXY LOAD BALANCER STATISTICS")
@@ -106,6 +121,10 @@ class StatsReporter:
         print(f"Total Proxies: {total_proxies}")
         print(f"Available Proxies: {stats['available_proxies_count']}")
         print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
+        print(f"Resting Proxies: {stats['resting_proxies_count']}")
+        print(f"Total Proxies: {total_proxies}")
+        print(f"Available Proxies: {stats['available_proxies_count']}")
+        print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
         
         print(f"\nPER-PROXY STATISTICS ({len(stats['proxy_stats'])} proxies):")
         print("-" * 70)
@@ -113,7 +132,7 @@ class StatsReporter:
         print("-" * 70)
         
         sorted_proxies = sorted(stats['proxy_stats'].items(), 
-                               key=lambda x: (x[1]['status'] == 'unavailable', x[0]))
+                               key=lambda x: (x[1]['status'] == 'unavailable', x[1]['status'] == 'resting', x[0]))
         
         for proxy_key, proxy_stats in sorted_proxies:
             print(f"{proxy_key:<25} {proxy_stats['requests']:<10} {proxy_stats['successes']:<10} "
@@ -129,16 +148,22 @@ class StatsReporter:
         
         print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
               f"{stats['overall_success_rate']}% success, "
-              f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count']} proxies up")
+              f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count'] + stats['resting_proxies_count']} proxies up")
         
         print("Proxies: ", end="")
         proxy_summaries = []
         
         sorted_proxies = sorted(stats['proxy_stats'].items(), 
-                               key=lambda x: (x[1]['status'] == 'unavailable', x[0]))
+                               key=lambda x: (x[1]['status'] == 'unavailable', x[1]['status'] == 'resting', x[0]))
         
         for proxy_key, proxy_stats in sorted_proxies:
-            status_symbol = "✓" if proxy_stats['status'] == "available" else "✗"
+            if proxy_stats['status'] == "available":
+                status_symbol = "✓"
+            elif proxy_stats['status'] == "resting":
+                status_symbol = "💤"
+            else:
+                status_symbol = "✗"
+                
             if proxy_stats['requests'] > 0:
                 proxy_summaries.append(f"{proxy_key}({proxy_stats['requests']}r/{proxy_stats['success_rate']}%{status_symbol})")
             else:
@@ -298,8 +323,11 @@ class StatsReporter:
             Dictionary with proxy statistics or None if proxy not found
         """
         with self.proxy_balancer.stats_lock:
-            # Check if proxy exists in available or unavailable lists
+            # Check if proxy exists in available, unavailable, or resting lists
             all_proxies = self.proxy_balancer.available_proxies + self.proxy_balancer.unavailable_proxies
+            resting_proxies = [info["proxy"] for info in self.proxy_balancer.resting_proxies.values()]
+            all_proxies.extend(resting_proxies)
+            
             proxy_exists = any(ProxyManager.get_proxy_key(p) == proxy_key for p in all_proxies)
             
             if not proxy_exists:
@@ -307,7 +335,14 @@ class StatsReporter:
             
             # Determine proxy status
             is_available = any(ProxyManager.get_proxy_key(p) == proxy_key for p in self.proxy_balancer.available_proxies)
-            status = "available" if is_available else "unavailable"
+            is_resting = proxy_key in self.proxy_balancer.resting_proxies
+            
+            if is_resting:
+                status = "resting"
+            elif is_available:
+                status = "available"
+            else:
+                status = "unavailable"
             
             # Get stats from proxy_stats if it has been used
             if proxy_key in self.proxy_balancer.proxy_stats:
@@ -337,14 +372,26 @@ class StatsReporter:
 
     def get_all_proxy_keys(self) -> List[str]:
         """
-        Get list of all proxy keys (both available and unavailable).
+        Get list of all proxy keys (available, unavailable, and resting).
         
         Returns:
             List of proxy keys in format "host:port"
         """
         with self.proxy_balancer.stats_lock:
             all_proxies = self.proxy_balancer.available_proxies + self.proxy_balancer.unavailable_proxies
-            return [ProxyManager.get_proxy_key(proxy) for proxy in all_proxies]
+            resting_proxies = [info["proxy"] for info in self.proxy_balancer.resting_proxies.values()]
+            all_proxies.extend(resting_proxies)
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_keys = []
+            for proxy in all_proxies:
+                key = ProxyManager.get_proxy_key(proxy)
+                if key not in seen:
+                    seen.add(key)
+                    unique_keys.append(key)
+            
+            return unique_keys
 
     def get_proxy_summary(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -366,12 +413,12 @@ class StatsReporter:
         Get all proxies filtered by status.
         
         Args:
-            status: "available" or "unavailable"
+            status: "available", "unavailable", or "resting"
             
         Returns:
             List of proxy statistics for proxies with the specified status
         """
-        if status not in ["available", "unavailable"]:
+        if status not in ["available", "unavailable", "resting"]:
             return []
             
         result = []

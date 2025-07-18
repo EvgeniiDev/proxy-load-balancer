@@ -23,6 +23,7 @@ class ProxyBalancer:
         
         self.available_proxies: List[Dict[str, Any]] = config.get("proxies", [])
         self.unavailable_proxies: List[Dict[str, Any]] = []
+        self.resting_proxies: Dict[str, Dict[str, Any]] = {}
         
         self.proxy_stats: Dict[str, ProxyStats] = {}
         self.max_session_pool_size = 5
@@ -87,6 +88,15 @@ class ProxyBalancer:
         with self.proxy_selection_lock:
             self.available_proxies = new_proxies
             self.unavailable_proxies = []
+            
+            # Очистка отдыхающих прокси, которых больше нет в конфигурации
+            resting_keys_to_remove = []
+            for key in self.resting_proxies:
+                if key not in new_proxy_keys:
+                    resting_keys_to_remove.append(key)
+            
+            for key in resting_keys_to_remove:
+                del self.resting_proxies[key]
 
         self._cleanup_old_proxy_data(new_proxy_keys)
 
@@ -131,6 +141,9 @@ class ProxyBalancer:
             
             if self.unavailable_proxies:
                 self._check_unavailable_proxies()
+            
+            if self.resting_proxies:
+                self._check_resting_proxies()
             
             if current_time - last_full_check >= health_check_interval:
                 self._check_all_proxies()
@@ -236,6 +249,33 @@ class ProxyBalancer:
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.failure_count = 0
+
+    def _check_resting_proxies(self):
+        current_time = time.time()
+        proxies_to_restore = []
+        
+        with self.proxy_selection_lock:
+            for key, rest_info in list(self.resting_proxies.items()):
+                if current_time >= rest_info["rest_until"]:
+                    proxy = rest_info["proxy"]
+                    
+                    if self._test_proxy_health(proxy):
+                        self.available_proxies.append(proxy)
+                        proxies_to_restore.append(key)
+                        self.logger.info(f"Proxy {key} restored from rest period")
+                        
+                        with self.stats_lock:
+                            stats = self._get_or_create_proxy_stats(key)
+                            stats.failure_count = 0
+                    else:
+                        if proxy not in self.unavailable_proxies:
+                            self.unavailable_proxies.append(proxy)
+                        proxies_to_restore.append(key)
+                        self.logger.warning(f"Proxy {key} moved to unavailable after rest period")
+            
+            for key in proxies_to_restore:
+                if key in self.resting_proxies:
+                    del self.resting_proxies[key]
 
     def _mark_proxy_unhealthy(self, proxy: Dict[str, Any]):
         key = ProxyManager.get_proxy_key(proxy)
@@ -348,6 +388,21 @@ class ProxyBalancer:
                     self.unavailable_proxies.append(proxy)
                 
                 self.logger.error(f"Proxy {key} marked as unavailable after {failure_count} failures")
+
+    def mark_overloaded(self, proxy: Dict[str, Any]):
+        key = ProxyManager.get_proxy_key(proxy)
+        rest_duration = self.config.get("proxy_rest_duration", 300)
+        rest_until = time.time() + rest_duration
+
+        with self.proxy_selection_lock:
+            if proxy in self.available_proxies:
+                self.available_proxies.remove(proxy)
+                self.resting_proxies[key] = {
+                    "proxy": proxy,
+                    "rest_until": rest_until,
+                    "overload_count": self.resting_proxies.get(key, {}).get("overload_count", 0) + 1
+                }
+                self.logger.warning(f"Proxy {key} marked as overloaded, resting for {rest_duration} seconds")
 
     def _start_stats_monitoring(self):
         if not self.verbose:

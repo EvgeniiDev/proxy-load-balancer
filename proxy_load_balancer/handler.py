@@ -210,6 +210,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 verify=True,
                 stream=True,
             )
+            
+            if response.status_code == 429:
+                balancer.mark_overloaded(proxy)
+                if session:
+                    balancer.return_session(proxy, session)
+                try:
+                    self.send_error(429, "Too Many Requests - Proxy overloaded")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
+                return
+            
             balancer.mark_success(proxy)
             self.send_response(response.status_code)
             
