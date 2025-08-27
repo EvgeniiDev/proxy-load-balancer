@@ -215,8 +215,63 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 balancer.mark_overloaded(proxy)
                 if session:
                     balancer.return_session(proxy, session)
+                tried = {id(proxy)}
+                last_response = response
+                while True:
+                    alt = balancer.get_next_proxy()
+                    if not alt or id(alt) in tried:
+                        break
+                    tried.add(id(alt))
+                    alt_session = None
+                    try:
+                        alt_session = balancer.get_session(alt)
+                        alt_resp = alt_session.request(
+                            method=self.command,
+                            url=url,
+                            headers=headers,
+                            data=body,
+                            timeout=balancer.config["connection_timeout"],
+                            allow_redirects=False,
+                            verify=True,
+                            stream=True,
+                        )
+                        last_response = alt_resp
+                        if alt_resp.status_code == 429:
+                            balancer.mark_overloaded(alt)
+                            balancer.return_session(alt, alt_session)
+                            continue
+                        balancer.mark_success(alt)
+                        self.send_response(alt_resp.status_code)
+                        for header, value in alt_resp.headers.items():
+                            header_lower = header.lower()
+                            if header_lower not in [
+                                "connection", "transfer-encoding", "via", "x-forwarded-for",
+                                "x-forwarded-host", "x-forwarded-proto", "x-real-ip",
+                                "proxy-connection", "proxy-authenticate", "server"
+                            ]:
+                                self.send_header(header, value)
+                        self.end_headers()
+                        for chunk in alt_resp.iter_content(8192):
+                            if chunk:
+                                try:
+                                    self.wfile.write(chunk)
+                                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                                    break
+                        balancer.return_session(alt, alt_session)
+                        return
+                    except Exception:
+                        balancer.mark_failure(alt)
+                        if alt_session:
+                            try:
+                                alt_session.close()
+                            except:
+                                pass
+                        continue
                 try:
-                    self.send_error(429, "Too Many Requests - Proxy overloaded")
+                    if getattr(last_response, "status_code", None) == 429:
+                        self.send_error(429, "Too Many Requests - Proxy overloaded")
+                    else:
+                        self.send_error(502, "Bad Gateway")
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     pass
                 return
