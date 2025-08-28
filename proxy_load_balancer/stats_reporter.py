@@ -42,7 +42,7 @@ class StatsReporter:
             total_failures = sum(stats.failure_count for stats in self.proxy_balancer.proxy_stats.values())
             total_overloads = sum(stats.total_overloads for stats in self.proxy_balancer.proxy_stats.values())
             current_overloads = sum(stats.overload_count for stats in self.proxy_balancer.proxy_stats.values())
-            total_429 = total_overloads
+            total_429 = sum(stats.total_429 for stats in self.proxy_balancer.proxy_stats.values())
             
             proxy_stats = {}
             
@@ -54,7 +54,7 @@ class StatsReporter:
                     "failures": stats.failure_count,
                     "overloads": stats.overload_count,
                     "total_overloads": stats.total_overloads,
-                    "status_429": stats.total_overloads,
+                    "status_429": stats.total_429,
                     "success_rate": round(stats.get_success_rate(), 2),
                     "status": "available" if any(ProxyManager.get_proxy_key(p) == key for p in self.proxy_balancer.available_proxies) else "unavailable",
                     "sessions_pooled": len(stats.session_pool)

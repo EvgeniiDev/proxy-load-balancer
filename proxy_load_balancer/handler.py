@@ -279,7 +279,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         continue
                 try:
                     if getattr(last_response, "status_code", None) == 429:
-                            self.send_error(503, "Service Unavailable. Tried 20 times")
+                        if retries_done >= max_retries_429 or available_count >= 10:
+                            self.send_error(503, "Service Unavailable")
+                        else:
+                            self.send_error(429, "Too Many Requests - Proxy overloaded")
                     else:
                         self.send_error(502, "Bad Gateway")
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):

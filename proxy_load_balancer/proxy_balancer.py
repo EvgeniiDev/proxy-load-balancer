@@ -373,6 +373,10 @@ class ProxyBalancer:
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.increment_overloads()
+            try:
+                stats.increment_429()
+            except Exception:
+                pass
             overload_count = stats.overload_count
 
         base_rest_duration = float(self.config.get("overload_backoff_base_secs", 30))
