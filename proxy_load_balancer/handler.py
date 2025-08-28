@@ -3,6 +3,7 @@ import socket
 import logging
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Dict, Optional
+import socks
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -87,8 +88,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
         return dest_host, dest_port
 
     def _create_proxy_connection(self, proxy, dest_host, dest_port):
-        s = socket.create_connection((dest_host, dest_port), timeout=10)
-        return s
+        remote_socket = socks.socksocket()
+        remote_socket.set_proxy(
+            proxy_type=socks.SOCKS5,
+            addr=proxy["host"],
+            port=proxy["port"],
+            username=proxy.get("username"),
+            password=proxy.get("password"),
+        )
+        remote_socket.settimeout(10)
+        remote_socket.connect((dest_host, dest_port))
+        return remote_socket
 
     def _tunnel_data(self, client_socket, remote_socket):
         sockets = [client_socket, remote_socket]
