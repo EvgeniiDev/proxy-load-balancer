@@ -4,6 +4,7 @@ import logging
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Dict, Optional
 import socks
+from .utils import ProxyManager
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -216,14 +217,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 balancer.mark_overloaded(proxy)
                 if session:
                     balancer.return_session(proxy, session)
-                tried = {id(proxy)}
+                tried_keys = {ProxyManager.get_proxy_key(proxy)}
                 last_response = response
-                # Try next available proxy immediately
-                while True:
+                available_count = len(getattr(balancer, "available_proxies", []))
+                max_retries_429 = 20
+
+                retries_done = 0
+                while retries_done < max_retries_429 and len(tried_keys) < max(available_count, 1):
                     alt = balancer.get_next_proxy()
-                    if not alt or id(alt) in tried:
+                    if not alt:
                         break
-                    tried.add(id(alt))
+                    alt_key = ProxyManager.get_proxy_key(alt)
+                    if alt_key in tried_keys:
+                        continue
+                    tried_keys.add(alt_key)
+                    retries_done += 1
                     alt_session = None
                     try:
                         alt_session = balancer.get_session(alt)
@@ -271,7 +279,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         continue
                 try:
                     if getattr(last_response, "status_code", None) == 429:
-                        self.send_error(429, "Too Many Requests - Proxy overloaded")
+                            self.send_error(503, "Service Unavailable. Tried 20 times")
                     else:
                         self.send_error(502, "Bad Gateway")
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
