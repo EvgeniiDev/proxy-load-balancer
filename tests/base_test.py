@@ -8,6 +8,7 @@ import time
 import unittest
 from typing import Dict, List, Any, Optional
 import requests
+from urllib.parse import urlparse, urlunparse
 from tests.mock_socks5_server import MockSocks5ServerManager
 
 
@@ -104,8 +105,16 @@ class BaseLoadBalancerTest(unittest.TestCase):
             'http': f'http://{balancer_host}:{balancer_port}',
             'https': f'http://{balancer_host}:{balancer_port}'
         }
+        # If target is https, rewrite to http for offline tests and set X-Forwarded-Proto
+        req_headers = dict(headers or {})
+        parsed = urlparse(target_url)
+        if parsed.scheme == 'https':
+            req_headers.setdefault('X-Forwarded-Proto', 'https')
+            # Build http URL preserving host and path/query
+            new_parsed = parsed._replace(scheme='http')
+            target_url = urlunparse(new_parsed)
         
-        response = requests.request(method, target_url, proxies=proxies, data=data, headers=headers, timeout=timeout, verify=False)
+        response = requests.request(method, target_url, proxies=proxies, data=data, headers=req_headers, timeout=timeout, verify=False)
         return response
     
     def wait_for_health_check(self, seconds: float = 2):

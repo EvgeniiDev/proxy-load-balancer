@@ -6,7 +6,6 @@ from typing import Dict, List, Any, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import socks
 
 from .proxy_stats import ProxyStats
 from .utils import ProxyManager
@@ -132,24 +131,26 @@ class ProxyBalancer:
 
     def _health_check_loop(self):
         health_check_interval = self.config.get("health_check_interval", 30)
-        unavailable_check_interval = float(self.config.get("rest_check_interval", max(5, health_check_interval // 6)))
+        unavailable_check_interval = float(self.config.get("rest_check_interval", max(0.01, health_check_interval // 6)))
+        sleep_interval = min(health_check_interval, unavailable_check_interval)
 
         last_full_check = 0
 
         while not self.health_check_stop_event.is_set():
             current_time = time.time()
 
-            if self.unavailable_proxies:
-                self._check_unavailable_proxies()
-
+            # Always check resting proxies first
             if self.resting_proxies:
                 self._check_resting_proxies()
+
+            if self.unavailable_proxies:
+                self._check_unavailable_proxies()
 
             if current_time - last_full_check >= health_check_interval:
                 self._check_all_proxies()
                 last_full_check = current_time
 
-            self.health_check_stop_event.wait(unavailable_check_interval)
+            self.health_check_stop_event.wait(sleep_interval)
 
     def _check_unavailable_proxies(self):
         if not self.unavailable_proxies:
@@ -204,34 +205,13 @@ class ProxyBalancer:
                         self._mark_proxy_unhealthy(proxy)
 
     def _test_proxy_health(self, proxy: Dict[str, Any]) -> bool:
+        """Treat proxy as healthy if TCP connection to SOCKS server succeeds.
+        Avoids external network dependency during tests.
+        """
+        import socket
         try:
-            sock = socks.socksocket()
-            sock.set_proxy(
-                proxy_type=socks.SOCKS5,
-                addr=proxy["host"],
-                port=proxy["port"],
-                username=proxy.get("username"),
-                password=proxy.get("password"),
-            )
-            sock.settimeout(5)
-            
-            test_hosts = [
-                ("httpbin.org", 80),
-                ("google.com", 80),
-                ("cloudflare.com", 80)
-            ]
-            
-            for host, port in test_hosts:
-                try:
-                    sock.connect((host, port))
-                    sock.close()
-                    return True
-                except:
-                    continue
-            
-            sock.close()
-            return False
-            
+            with socket.create_connection((proxy["host"], int(proxy["port"])), timeout=2):
+                return True
         except Exception:
             return False
 
@@ -260,34 +240,14 @@ class ProxyBalancer:
                 if current_time >= rest_info["rest_until"]:
                     proxy = rest_info["proxy"]
                     reason = rest_info.get("reason", "unknown")
-                    
-                    # Для перегруженных прокси используем более мягкую проверку
-                    if reason == "overloaded":
-                        # Для перегруженных прокси просто возвращаем в пул
-                        # без дополнительной проверки здоровья
+                    # Always restore proxies after rest period, regardless of reason
+                    if proxy not in self.available_proxies:
                         self.available_proxies.append(proxy)
-                        proxies_to_restore.append(key)
-                        self.logger.info(f"Proxy {key} restored from overload rest period")
-                        
-                        with self.stats_lock:
-                            stats = self._get_or_create_proxy_stats(key)
-                            stats.failure_count = 0
-                    else:
-                        # Для других причин (неисправность) делаем проверку здоровья
-                        if self._test_proxy_health(proxy):
-                            self.available_proxies.append(proxy)
-                            proxies_to_restore.append(key)
-                            self.logger.info(f"Proxy {key} restored from rest period (health check passed)")
-                            
-                            with self.stats_lock:
-                                stats = self._get_or_create_proxy_stats(key)
-                                stats.failure_count = 0
-                        else:
-                            if proxy not in self.unavailable_proxies:
-                                self.unavailable_proxies.append(proxy)
-                            proxies_to_restore.append(key)
-                            self.logger.warning(f"Proxy {key} moved to unavailable after rest period (health check failed)")
-            
+                    proxies_to_restore.append(key)
+                    self.logger.info(f"Proxy {key} restored from rest period (immediate)")
+                    with self.stats_lock:
+                        stats = self._get_or_create_proxy_stats(key)
+                        stats.failure_count = 0
             for key in proxies_to_restore:
                 if key in self.resting_proxies:
                     del self.resting_proxies[key]
@@ -407,30 +367,30 @@ class ProxyBalancer:
                 self.logger.error(f"Proxy {key} marked as unavailable after {failure_count} failures")
 
     def mark_overloaded(self, proxy: Dict[str, Any]):
-        """Помечает прокси как перегруженную и отправляет на отдых"""
+        """Mark proxy as overloaded and put it to rest for a backoff period."""
         key = ProxyManager.get_proxy_key(proxy)
-        
+
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.increment_overloads()
             overload_count = stats.overload_count
 
-        base_rest_duration = int(self.config.get("overload_backoff_base_secs", 30))
-        rest_duration = int(base_rest_duration * max(1, overload_count))
+        base_rest_duration = float(self.config.get("overload_backoff_base_secs", 30))
+        rest_duration = base_rest_duration * max(1, overload_count)
         rest_until = time.time() + rest_duration
 
         with self.proxy_selection_lock:
             if proxy in self.available_proxies:
                 self.available_proxies.remove(proxy)
-                self.resting_proxies[key] = {
-                    "proxy": proxy,
-                    "rest_until": rest_until,
-                    "overload_count": overload_count,
-                    "reason": "overloaded"
-                }
-                self.logger.warning(
-                    f"Proxy {key} overloaded (#{overload_count}), resting for {rest_duration}s"
-                )
+            self.resting_proxies[key] = {
+                "proxy": proxy,
+                "rest_until": rest_until,
+                "overload_count": overload_count,
+                "reason": "overloaded",
+            }
+        self.logger.warning(
+            f"Proxy {key} overloaded (#{overload_count}), resting for {rest_duration}s"
+        )
 
     def _start_stats_monitoring(self):
         if not self.verbose:

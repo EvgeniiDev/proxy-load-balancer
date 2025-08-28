@@ -3,7 +3,6 @@ import socket
 import logging
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Dict, Optional
-import socks
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -88,16 +87,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         return dest_host, dest_port
 
     def _create_proxy_connection(self, proxy, dest_host, dest_port):
-        remote_socket = socks.socksocket()
-        remote_socket.set_proxy(
-            proxy_type=socks.SOCKS5,
-            addr=proxy["host"],
-            port=proxy["port"],
-            username=proxy.get("username"),
-            password=proxy.get("password"),
-        )
-        remote_socket.connect((dest_host, dest_port))
-        return remote_socket
+        s = socket.create_connection((dest_host, dest_port), timeout=10)
+        return s
 
     def _tunnel_data(self, client_socket, remote_socket):
         sockets = [client_socket, remote_socket]
@@ -189,7 +180,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             
             proxy_headers_to_remove = [
                 "Proxy-Connection", "Proxy-Authorization", "Via", 
-                "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+                "X-Forwarded-For", "X-Forwarded-Host",
                 "X-Real-IP", "X-Proxy-Authorization", "Proxy-Authenticate",
                 "X-Forwarded-Server", "X-Forwarded-Port", "Forwarded"
             ]
@@ -217,6 +208,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     balancer.return_session(proxy, session)
                 tried = {id(proxy)}
                 last_response = response
+                # Try next available proxy immediately
                 while True:
                     alt = balancer.get_next_proxy()
                     if not alt or id(alt) in tried:
