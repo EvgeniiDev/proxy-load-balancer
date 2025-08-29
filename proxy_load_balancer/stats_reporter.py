@@ -27,6 +27,27 @@ class StatsReporter:
         
         self._setup_logger()
     
+    def _is_problematic_proxy(self, proxy_stats: Dict[str, Any]) -> bool:
+        """
+        Determine if a proxy has problems and should be displayed in stats.
+        
+        Args:
+            proxy_stats: Proxy statistics dictionary
+            
+        Returns:
+            True if proxy has problems, False otherwise
+        """
+        # Always show unavailable and resting proxies
+        if proxy_stats['status'] in ['unavailable', 'resting']:
+            return True
+        
+        # Show available proxies with low success rate (if they have been used significantly)
+        if proxy_stats['status'] == 'available' and proxy_stats['requests'] > 10:
+            if proxy_stats['success_rate'] < 50.0:
+                return True
+        
+        return False
+
     def _setup_logger(self):
         self.logger.setLevel(logging.INFO)
         if not self.logger.handlers:
@@ -149,7 +170,11 @@ class StatsReporter:
         print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
         print(f"Resting Proxies: {stats['resting_proxies_count']}")
 
-        print(f"\nPER-PROXY STATISTICS ({len(stats['proxy_stats'])} proxies):")
+        # Filter only problematic proxies
+        problematic_proxies = [(key, proxy_stats) for key, proxy_stats in stats['proxy_stats'].items() 
+                              if self._is_problematic_proxy(proxy_stats)]
+        
+        print(f"\nPER-PROXY STATISTICS ({len(problematic_proxies)} problematic proxies):")
         print("-" * 70)
         print(
             f"{'Proxy':<25} {'Requests':<10} {'Success':<10} {'Failures':<10} {'429':<6} {'Rate':<8} {'Status':<12}"
@@ -157,7 +182,7 @@ class StatsReporter:
         print("-" * 70)
 
         sorted_proxies = sorted(
-            stats['proxy_stats'].items(),
+            problematic_proxies,
             key=lambda x: (
                 x[1]['status'] == 'unavailable',
                 x[1]['status'] == 'resting',
@@ -191,6 +216,9 @@ class StatsReporter:
                                key=lambda x: (x[1]['status'] == 'unavailable', x[1]['status'] == 'resting', x[0]))
         
         for proxy_key, proxy_stats in sorted_proxies:
+            if not self._is_problematic_proxy(proxy_stats):
+                continue
+                
             if proxy_stats['status'] == "available":
                 status_symbol = "✓"
             elif proxy_stats['status'] == "resting":
@@ -207,7 +235,10 @@ class StatsReporter:
             else:
                 proxy_summaries.append(f"{proxy_key}(0r{status_symbol})")
         
-        print(" | ".join(proxy_summaries))
+        if proxy_summaries:
+            print(" | ".join(proxy_summaries))
+        else:
+            print("All proxies working fine ✓")
 
     def log_stats_summary(self) -> None:
         stats = self.get_stats()
