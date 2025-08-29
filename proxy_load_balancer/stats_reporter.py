@@ -207,6 +207,7 @@ class StatsReporter:
         print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
               f"{stats['overall_success_rate']}% success, "
               f"{stats['total_overloads']} overloads, "
+              f"{stats['total_429']} 429s, "
               f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count'] + stats['resting_proxies_count']} proxies up")
         
         print("Proxies: ", end="")

@@ -26,7 +26,7 @@ class TestOverloadBackoff(BaseLoadBalancerTest):
     def test_429_triggers_rest_and_switch(self):
         self.update_config_file(
             self.config_path,
-            {"overload_backoff_base_secs": 0.2, "rest_check_interval": 0.05},
+            {"overload_backoff_base_secs": 0.2, "rest_check_interval": 0.05, "stats_interval": 1},
         )
         r1 = self.make_request_through_proxy(
             balancer_port=self.balancer_port, target_url="http://httpbin.org/status/429"
@@ -46,7 +46,7 @@ class TestOverloadBackoff(BaseLoadBalancerTest):
     def test_multiple_requests_no_429_after_backoff(self):
         self.update_config_file(
             self.config_path,
-            {"overload_backoff_base_secs": 0.2, "rest_check_interval": 0.05},
+            {"overload_backoff_base_secs": 0.2, "rest_check_interval": 0.05, "stats_interval": 1},
         )
         r1 = self.make_request_through_proxy(
             balancer_port=self.balancer_port, target_url="http://httpbin.org/status/429"

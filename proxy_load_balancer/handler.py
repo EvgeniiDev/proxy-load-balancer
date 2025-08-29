@@ -205,7 +205,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             all_429 = True
             
             for attempt in range(20):
-                proxy = balancer.get_next_proxy()
+                if not proxy:  # Если proxy уже был выбран ранее, используем его
+                    proxy = balancer.get_next_proxy()
                 if not proxy:
                     break
                 session = None
@@ -223,9 +224,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     )
                     has_responses = True
                     if response.status_code == 429:
+                        balancer.mark_429_response(proxy)
                         balancer.mark_overloaded(proxy)
                         if session:
                             balancer.return_session(proxy, session)
+                        proxy = None  # Сбросить proxy, чтобы выбрать новый на следующей итерации
                         continue
                     all_429 = False
                     balancer.mark_success(proxy)
@@ -254,6 +257,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             session.close()
                         except:
                             pass
+                    proxy = None  # Сбросить proxy, чтобы выбрать новый на следующей итерации
                     continue
             
             if has_responses and all_429:

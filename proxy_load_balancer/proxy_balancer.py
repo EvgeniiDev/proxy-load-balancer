@@ -373,10 +373,6 @@ class ProxyBalancer:
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.increment_overloads()
-            try:
-                stats.increment_429()
-            except Exception:
-                pass
             overload_count = stats.overload_count
 
         base_rest_duration = float(self.config.get("overload_backoff_base_secs", 30))
@@ -395,6 +391,13 @@ class ProxyBalancer:
         self.logger.warning(
             f"Proxy {key} overloaded (#{overload_count}), resting for {rest_duration}s"
         )
+
+    def mark_429_response(self, proxy: Dict[str, Any]):
+        """Mark that proxy returned 429 response."""
+        key = ProxyManager.get_proxy_key(proxy)
+        with self.stats_lock:
+            stats = self._get_or_create_proxy_stats(key)
+            stats.increment_429()
 
     def _start_stats_monitoring(self):
         if not self.verbose:
