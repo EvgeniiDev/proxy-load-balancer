@@ -31,7 +31,7 @@ class TestOverloadBackoff(BaseLoadBalancerTest):
         r1 = self.make_request_through_proxy(
             balancer_port=self.balancer_port, target_url="http://httpbin.org/status/429"
         )
-        self.assertEqual(r1.status_code, 429)
+        self.assertEqual(r1.status_code, 503)  # All proxies return 429, so 503
 
         self.wait_for_health_check(0.4)
         r2 = self.make_request_through_proxy(
@@ -51,7 +51,7 @@ class TestOverloadBackoff(BaseLoadBalancerTest):
         r1 = self.make_request_through_proxy(
             balancer_port=self.balancer_port, target_url="http://httpbin.org/status/429"
         )
-        self.assertEqual(r1.status_code, 429)
+        self.assertEqual(r1.status_code, 503)  # All proxies return 429, so 503
 
         self.wait_for_health_check(0.3)
 
