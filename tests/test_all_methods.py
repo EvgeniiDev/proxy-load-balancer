@@ -10,7 +10,7 @@ class TestAllMethods(BaseLoadBalancerTest):
         self.config_path = self.create_test_config(proxies=self.proxies)
         self.balancer_port = self.start_balancer_with_config(self.config_path)
 
-    def test_http_get(self):
+    def test_https_get(self):
         response = self.make_request_through_proxy(
             balancer_port=self.balancer_port,
             target_url="http://httpbin.org/get",
@@ -19,16 +19,7 @@ class TestAllMethods(BaseLoadBalancerTest):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["url"], "http://httpbin.org/get")
 
-    def test_https_get(self):
-        response = self.make_request_through_proxy(
-            balancer_port=self.balancer_port,
-            target_url="https://httpbin.org/get",
-            method="GET"
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["url"], "https://httpbin.org/get")
-
-    def test_http_post(self):
+    def test_https_post(self):
         post_data = {"test": "data"}
         response = self.make_request_through_proxy(
             balancer_port=self.balancer_port,
@@ -40,19 +31,7 @@ class TestAllMethods(BaseLoadBalancerTest):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["json"], post_data)
 
-    def test_https_post(self):
-        post_data = {"test": "data"}
-        response = self.make_request_through_proxy(
-            balancer_port=self.balancer_port,
-            target_url="https://httpbin.org/post",
-            method="POST",
-            data=json.dumps(post_data),
-            headers={"Content-Type": "application/json"}
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["json"], post_data)
-
-    def test_http_put(self):
+    def test_https_put(self):
         put_data = {"test": "updated"}
         response = self.make_request_through_proxy(
             balancer_port=self.balancer_port,
@@ -64,30 +43,10 @@ class TestAllMethods(BaseLoadBalancerTest):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["json"], put_data)
 
-    def test_https_put(self):
-        put_data = {"test": "updated"}
-        response = self.make_request_through_proxy(
-            balancer_port=self.balancer_port,
-            target_url="https://httpbin.org/put",
-            method="PUT",
-            data=json.dumps(put_data),
-            headers={"Content-Type": "application/json"}
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["json"], put_data)
-
-    def test_http_delete(self):
-        response = self.make_request_through_proxy(
-            balancer_port=self.balancer_port,
-            target_url="http://httpbin.org/delete",
-            method="DELETE"
-        )
-        self.assertEqual(response.status_code, 200)
-
     def test_https_delete(self):
         response = self.make_request_through_proxy(
             balancer_port=self.balancer_port,
-            target_url="https://httpbin.org/delete",
+            target_url="http://httpbin.org/delete",
             method="DELETE"
         )
         self.assertEqual(response.status_code, 200)

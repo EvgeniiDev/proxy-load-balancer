@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -24,6 +24,7 @@ class ConfigHandler(FileSystemEventHandler):
                 thread = threading.Thread(target=self._reload_config)
                 thread.daemon = True
                 thread.start()
+
     def _reload_config(self):
         try:
             logger = logging.getLogger("config_handler")
@@ -36,6 +37,7 @@ class ConfigHandler(FileSystemEventHandler):
         except Exception as e:
             logger = logging.getLogger("config_handler")
             logger.error(f"Error reloading config: {e}")
+
     def validate_config(self, config: Dict[str, Any]) -> bool:
         required_fields = ["server", "proxies", "health_check_interval", "max_retries"]
         for field in required_fields:
@@ -50,14 +52,18 @@ class ConfigHandler(FileSystemEventHandler):
                 print(f"Invalid proxy configuration at index {i}")
                 return False
         return True
+    
 class ConfigManager:
+
     def __init__(self, config_file: str = "config.json"):
         self.config_file = config_file
         self.config = load_config(config_file)
         self.observer = None
         self.callbacks: list[Any] = []
+
     def add_change_callback(self, callback: Callable[[Dict[str, Any]], None]):
         self.callbacks.append(callback)
+
     def start_monitoring(self):
         if self.observer is not None:
             return
@@ -68,12 +74,14 @@ class ConfigManager:
         self.observer.schedule(handler, str(watch_dir), recursive=False)
         self.observer.start()
         print(f"Started monitoring config file: {self.config_file}")
+
     def stop_monitoring(self):
         if self.observer:
             self.observer.stop()
             self.observer.join()
             self.observer = None
             print("Stopped monitoring config file")
+
     def _on_config_changed(self, new_config: Dict[str, Any]):
         self.config = new_config
         for callback in self.callbacks:
@@ -81,14 +89,17 @@ class ConfigManager:
                 callback(new_config)
             except Exception as e:
                 print(f"Error in config change callback: {e}")
+
     def get_config(self) -> Dict[str, Any]:
         return self.config.copy()
+    
     def reload_config(self):
         try:
             new_config = load_config(self.config_file)
             self._on_config_changed(new_config)
         except Exception as e:
             print(f"Error reloading config manually: {e}")
+
 def load_config(config_file: str = "config.json") -> Dict[str, Any]:
     with open(config_file, "r", encoding='utf-8') as f:
         return json.load(f)

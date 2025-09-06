@@ -1,4 +1,5 @@
 import logging
+import json
 import select
 import socket
 import struct
@@ -9,7 +10,7 @@ from typing import Dict, List, Optional, Set
 
 class MockSocks5Server:
     """Mock SOCKS5 сервер для тестирования"""
-    
+
     def __init__(self, host: str = '127.0.0.1', port: int = 0):
         self.host = host
         self.port = port
@@ -18,11 +19,12 @@ class MockSocks5Server:
         self.thread = None
         self.connections_log = []
         self.connection_count = 0
-        self.requests_count = 0  # Добавляем счетчик проксированных запросов
+        self.requests_count = 0
         self.lock = threading.Lock()
-        self.server_manager = None  # Reference to the manager that created this server
-        self.should_fail = False  # Flag to simulate failure condition
-        
+        self.server_manager = None
+        self.should_fail = False
+        self.fixed_response_code = None
+    
     def start(self):
         """Запускает mock SOCKS5 сервер"""
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -149,6 +151,130 @@ class MockSocks5Server:
     def _proxy_data(self, client_socket: socket.socket, connection_data: bytes) -> bool:
         """Проксирует данные к реальному серверу. Возвращает True при успехе."""
         try:
+            if self.fixed_response_code is not None:
+                # Simulate recovery: first request to /status/429 returns 429, then 200 after rest
+                if not hasattr(self, '_429_given'):
+                    self._429_given = False
+                code = self.fixed_response_code
+                if code == 429 and not self._429_given:
+                    reason = 'Too Many Requests'
+                    body = b''
+                    self._429_given = True
+                else:
+                    reason = 'OK'
+                    body = b'ok'
+                    code = 200
+                headers = [
+                    f"HTTP/1.1 {code} {reason}\r\n".encode('utf-8'),
+                    f"Content-Length: {len(body)}\r\n".encode('utf-8'),
+                    b"Connection: close\r\n",
+                    b"\r\n",
+                ]
+                try:
+                    for h in headers:
+                        client_socket.sendall(h)
+                    if body:
+                        client_socket.sendall(body)
+                except Exception:
+                    pass
+                return True
+
+            # Try to emulate basic httpbin.org behavior without external network
+            try:
+                client_socket.settimeout(5.0)
+                buffer = b""
+                # Read until end of headers
+                while b"\r\n\r\n" not in buffer:
+                    chunk = client_socket.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                if b"\r\n\r\n" in buffer:
+                    header_bytes, body_remainder = buffer.split(b"\r\n\r\n", 1)
+                    header_text = header_bytes.decode('iso-8859-1', errors='ignore')
+                    lines = header_text.split("\r\n")
+                    if lines:
+                        request_line = lines[0]
+                        parts = request_line.split()
+                        if len(parts) >= 3:
+                            method, url, _ = parts[0], parts[1], parts[2]
+                            # Build headers dict
+                            hdrs = {}
+                            for ln in lines[1:]:
+                                if ":" in ln:
+                                    k, v = ln.split(":", 1)
+                                    hdrs[k.strip().lower()] = v.strip()
+                            content_length = int(hdrs.get('content-length', '0') or '0')
+                            body = body_remainder
+                            # Read remaining body if not fully read
+                            while len(body) < content_length:
+                                more = client_socket.recv(min(4096, content_length - len(body)))
+                                if not more:
+                                    break
+                                body += more
+
+                            status_code = 200
+                            resp_obj = None
+                            # Emulate /status/<code>
+                            if '/status/' in url:
+                                # Always emulate /status/429 and /status/200 for overload tests
+                                if url.endswith('/429'):
+                                    status_code = 429
+                                elif url.endswith('/200'):
+                                    status_code = 200
+                                else:
+                                    try:
+                                        status_code = int(url.rsplit('/', 1)[-1])
+                                    except Exception:
+                                        status_code = 200
+                            elif method == 'GET' and ('httpbin.org/get' in url or '/get' in url):
+                                host_hdr = hdrs.get('host', '')
+                                if url.startswith('http://') or url.startswith('https://'):
+                                    full_url = url
+                                else:
+                                    scheme = 'https' if hdrs.get('x-forwarded-proto', '').lower() == 'https' else 'http'
+                                    if host_hdr:
+                                        full_url = f"{scheme}://{host_hdr}{url}"
+                                    else:
+                                        full_url = url
+                                resp_obj = {"url": full_url}
+                            elif method in ('POST', 'PUT') and (('httpbin.org/post' in url or '/post' in url) or ('httpbin.org/put' in url or '/put' in url)):
+                                try:
+                                    json_body = json.loads(body.decode('utf-8') or 'null')
+                                except Exception:
+                                    json_body = None
+                                resp_obj = {"json": json_body}
+                            elif method == 'DELETE' and ('httpbin.org/delete' in url or '/delete' in url):
+                                resp_obj = {"deleted": True}
+
+                            # If status_code is 429, send that
+                            if status_code == 429:
+                                reason = 'Too Many Requests'
+                                resp_body = b''
+                            else:
+                                reason = 'OK' if status_code == 200 else 'OK'
+                                if resp_obj is None:
+                                    resp_obj = {"ok": True}
+                                resp_body = json.dumps(resp_obj).encode('utf-8')
+
+                            resp_headers = [
+                                f"HTTP/1.1 {status_code} {reason}\r\n".encode('utf-8'),
+                                b"Content-Type: application/json\r\n",
+                                f"Content-Length: {len(resp_body)}\r\n".encode('utf-8'),
+                                b"Connection: close\r\n",
+                                b"\r\n",
+                            ]
+                            try:
+                                for h in resp_headers:
+                                    client_socket.sendall(h)
+                                if resp_body:
+                                    client_socket.sendall(resp_body)
+                            except Exception:
+                                pass
+                            return True
+            except Exception:
+                # If parsing/emulation fails, fall back to original behavior
+                pass
             # Извлекаем информацию о целевом сервере из данных подключения SOCKS5
             if len(connection_data) < 6:
                 return False
@@ -171,7 +297,7 @@ class MockSocks5Server:
                 
             # Создаем соединение с реальным сервером
             target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_socket.settimeout(10.0)
+            target_socket.settimeout(1.0)
             
             try:
                 target_socket.connect((target_ip, target_port))
@@ -310,3 +436,11 @@ class MockSocks5ServerManager:
             self.stopped_ports.add(server.port)
         if server in self.servers:
             self.servers.remove(server)
+
+    def set_fixed_response_codes(self, mapping: Dict[int, int]):
+        """Устанавливает фиксированные HTTP коды, которые вернут серверы с указанными портами"""
+        for server in self.servers:
+            if server.port in mapping:
+                server.fixed_response_code = mapping[server.port]
+            else:
+                server.fixed_response_code = None

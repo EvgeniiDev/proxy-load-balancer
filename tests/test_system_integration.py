@@ -91,7 +91,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         successful_after = 0
         for _ in range(12):
             try:
-                response = self.make_request_through_proxy(balancer_port=balancer_port, target_url="http://httpbin.org/status/200", timeout=10)
+                response = self.make_request_through_proxy(balancer_port=balancer_port, target_url="https://httpbin.org/status/200", timeout=10)
                 if response and response.status_code == 200:
                     successful_after += 1
             except:
@@ -126,7 +126,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         self.server_manager.reset_all_stats()
         for _ in range(10):
             try:
-                self.make_request_through_proxy(balancer_port=balancer_port, target_url="http://httpbin.org/status/200", timeout=10)
+                self.make_request_through_proxy(balancer_port=balancer_port, target_url="https://httpbin.org/status/200", timeout=10)
             except:
                 pass
         stats_after_recovery = self.server_manager.get_server_stats()
@@ -140,7 +140,7 @@ class TestSystemIntegration(BaseLoadBalancerTest):
         successful_requests = 0
         for _ in range(18):
             try:
-                response = self.make_request_through_proxy(balancer_port=balancer_port, target_url="http://httpbin.org/status/200", timeout=10)
+                response = self.make_request_through_proxy(balancer_port=balancer_port, target_url="https://httpbin.org/status/200", timeout=10)
                 if response and response.status_code == 200:
                     successful_requests += 1
             except:

@@ -8,29 +8,29 @@ import time
 import unittest
 from typing import Dict, List, Any, Optional
 import requests
+from urllib.parse import urlparse, urlunparse
 from tests.mock_socks5_server import MockSocks5ServerManager
 
 
 class BaseLoadBalancerTest(unittest.TestCase):
-    """Базовый класс для тестов load balancer'а"""
-    
     def setUp(self):
-        """Настройка для каждого теста"""
         self.server_manager = MockSocks5ServerManager()
         self.temp_configs = []
-        self.balancer_process = None
+        self.balancer = None
+        self.config_manager = None
         
     def tearDown(self):
-        """Очистка после каждого теста"""
-        # Останавливаем балансировщик
-        if self.balancer_process:
-            self.balancer_process.terminate()
-            self.balancer_process.wait(timeout=5)
-            
-        # Останавливаем все mock серверы
+        if self.balancer:
+            try:
+                self.balancer.stop()
+            except Exception:
+                pass
+        if self.config_manager:
+            try:
+                self.config_manager.stop_monitoring()
+            except Exception:
+                pass
         self.server_manager.stop_all()
-        
-        # Удаляем временные конфигурационные файлы
         for config_path in self.temp_configs:
             try:
                 os.unlink(config_path)
@@ -43,52 +43,59 @@ class BaseLoadBalancerTest(unittest.TestCase):
                           server_port: int = 0,
                           health_check_interval: int = 1,
                           connection_timeout: int = 5,
-                          max_retries: int = 3) -> str:
-        """Создает временный конфигурационный файл для тестов"""
-        
+                          max_retries: int = 3,
+                          **extra) -> str:
         config = {
             "server": {
                 "host": "127.0.0.1",
-                "port": server_port
+                "port": 0 if server_port == 0 else server_port,
             },
+            "ssl_cert": "cert.pem",
+            "ssl_key": "key.pem",
             "proxies": proxies,
             "load_balancing_algorithm": algorithm,
             "health_check_interval": health_check_interval,
             "connection_timeout": connection_timeout,
-            "max_retries": max_retries
+            "max_retries": max_retries,
+            "overload_backoff_base_secs": 0.2,
+            "rest_check_interval": 0.05,
+            "stats_interval": 1,
         }
-        
-        # Создаем временный файл
+        for k, v in extra.items():
+            config[k] = v
         fd, config_path = tempfile.mkstemp(suffix='.json', prefix='test_config_')
         self.temp_configs.append(config_path)
-        
         with os.fdopen(fd, 'w') as f:
             json.dump(config, f, indent=2)
-            
         return config_path
         
     def start_balancer_with_config(self, config_path: str, wait_for_start: float = 0.5) -> int:
-        """Запускает балансировщик с указанной конфигурацией"""
+        from proxy_load_balancer.proxy_balancer import ProxyBalancer
+        from proxy_load_balancer.config import ConfigManager
         with open(config_path) as f:
             config = json.load(f)
-            
-        # Если порт не указан, найдем свободный
         if config['server']['port'] == 0:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(('127.0.0.1', 0))
                 config['server']['port'] = s.getsockname()[1]
-                
-            # Обновляем конфигурационный файл
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=2)
-                
-        self.balancer_process = subprocess.Popen([
-            'python', 'main.py', '-c', config_path, '-v'
-        ])
-        
+        self.config_manager = ConfigManager(config_path)
+        cfg = self.config_manager.get_config()
+        self.balancer = ProxyBalancer(cfg, verbose=True)
+        def on_config_change(new_cfg):
+            self.balancer.update_proxies(new_cfg)
+            self.balancer.reload_algorithm()
+        self.balancer.set_config_manager(self.config_manager, on_config_change)
+        self.config_manager.add_change_callback(on_config_change)
+        self.config_manager.start_monitoring()
+        self.balancer.start()
+        self.server_manager.balancer = self.balancer
         time.sleep(wait_for_start)
-        
-        return config['server']['port']
+        try:
+            return int(self.balancer.https_proxy.server_socket.getsockname()[1])
+        except Exception:
+            return config['server']['port']
             
     def make_request_through_proxy(self, 
                                   balancer_host: str = "127.0.0.1", 
@@ -101,11 +108,13 @@ class BaseLoadBalancerTest(unittest.TestCase):
         """Делает HTTP запрос через прокси балансировщик"""
         
         proxies = {
-            'http': f'http://{balancer_host}:{balancer_port}',
-            'https': f'http://{balancer_host}:{balancer_port}'
+            'http': f'https://{balancer_host}:{balancer_port}',
+            'https': f'https://{balancer_host}:{balancer_port}'
         }
-        
-        response = requests.request(method, target_url, proxies=proxies, data=data, headers=headers, timeout=timeout, verify=False)
+        req_headers = dict(headers or {})
+        if target_url.startswith('https://'):
+            req_headers['X-Forwarded-Proto'] = 'https'
+        response = requests.request(method, target_url, proxies=proxies, data=data, headers=req_headers, timeout=timeout, verify=False)
         return response
     
     def wait_for_health_check(self, seconds: float = 2):

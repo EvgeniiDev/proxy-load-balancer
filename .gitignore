@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+# SSL certificates (for security)
+*.pem
+*.key
+*.crt
+*.csr
+
 # Distribution / packaging
 .Python
 build/
@@ -195,3 +201,10 @@ cython_debug/
 
 .github
 .idea
+
+
+testing/scripts/tor-data
+testing/tor_configs
+testing/tor-data
+testing/temp_torrc_*
+testing/results/full_tor_test_*

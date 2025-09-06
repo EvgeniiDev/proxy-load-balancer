@@ -27,38 +27,69 @@ class StatsReporter:
         
         self._setup_logger()
     
+    def _is_problematic_proxy(self, proxy_stats: Dict[str, Any]) -> bool:
+        """
+        Determine if a proxy has problems and should be displayed in stats.
+        
+        Args:
+            proxy_stats: Proxy statistics dictionary
+            
+        Returns:
+            True if proxy has problems, False otherwise
+        """
+        if proxy_stats['status'] in ['unavailable', 'resting']:
+            return True
+        if proxy_stats.get('r429', 0) > 0:
+            return True
+        if proxy_stats['status'] == 'available' and proxy_stats['requests'] > 10:
+            if proxy_stats['success_rate'] < 50.0:
+                return True
+        return False
+
     def _setup_logger(self):
         self.logger.setLevel(logging.INFO)
         if not self.logger.handlers:
-            handler = logging.StreamHandler()
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+            console = logging.StreamHandler()
+            console.setFormatter(formatter)
+            self.logger.addHandler(console)
+            try:
+                file_handler = logging.FileHandler('lb.log')
+                file_handler.setFormatter(formatter)
+                self.logger.addHandler(file_handler)
+            except Exception:
+                pass
 
     def get_stats(self) -> Dict[str, Any]:
         with self.proxy_balancer.stats_lock:
-            total_requests = sum(stats.request_count for stats in self.proxy_balancer.proxy_stats.values())
-            total_successes = sum(stats.success_count for stats in self.proxy_balancer.proxy_stats.values())
-            total_failures = sum(stats.failure_count for stats in self.proxy_balancer.proxy_stats.values())
-            total_overloads = sum(stats.total_overloads for stats in self.proxy_balancer.proxy_stats.values())
-            current_overloads = sum(stats.overload_count for stats in self.proxy_balancer.proxy_stats.values())
-            
+            total_requests = 0
+            total_successes = 0
+            total_failures = 0
+            total_overloads = 0
+            current_overloads = 0
+            total_429 = 0
             proxy_stats = {}
-            
-            # Add stats for proxies that have been used
+
             for key, stats in self.proxy_balancer.proxy_stats.items():
-                proxy_stats[key] = {
+                status = "available" if any(ProxyManager.get_proxy_key(p) == key for p in self.proxy_balancer.available_proxies) else ("resting" if key in self.proxy_balancer.resting_proxies else "unavailable")
+                ps = {
                     "requests": stats.request_count,
                     "successes": stats.success_count,
-                    "failures": stats.failure_count,
-                    "overloads": stats.overload_count,
-                    "total_overloads": stats.total_overloads,
+                    "failures": stats.total_failures,
+                    "status": status,
                     "success_rate": round(stats.get_success_rate(), 2),
-                    "status": "available" if any(ProxyManager.get_proxy_key(p) == key for p in self.proxy_balancer.available_proxies) else "unavailable",
-                    "sessions_pooled": len(stats.session_pool)
+                    "r200": getattr(stats, "responses_200", 0),
+                    "r429": getattr(stats, "responses_429", 0),
+                    "rother": getattr(stats, "responses_other", 0),
                 }
-            
-            # Add stats for all available proxies that haven't been used yet
+                proxy_stats[key] = ps
+                total_requests += stats.request_count
+                total_successes += stats.success_count
+                total_failures += stats.total_failures
+                total_overloads += stats.total_overloads
+                current_overloads += stats.overload_count
+                total_429 += stats.total_429
+
             for proxy in self.proxy_balancer.available_proxies:
                 key = ProxyManager.get_proxy_key(proxy)
                 if key not in proxy_stats:
@@ -66,14 +97,13 @@ class StatsReporter:
                         "requests": 0,
                         "successes": 0,
                         "failures": 0,
-                        "overloads": 0,
-                        "total_overloads": 0,
-                        "success_rate": 0.0,
                         "status": "available",
-                        "sessions_pooled": 0
+                        "success_rate": 0.0,
+                        "r200": 0,
+                        "r429": 0,
+                        "rother": 0,
                     }
-            
-            # Add stats for all unavailable proxies that haven't been used yet
+
             for proxy in self.proxy_balancer.unavailable_proxies:
                 key = ProxyManager.get_proxy_key(proxy)
                 if key not in proxy_stats:
@@ -81,40 +111,36 @@ class StatsReporter:
                         "requests": 0,
                         "successes": 0,
                         "failures": 0,
-                        "overloads": 0,
-                        "total_overloads": 0,
-                        "success_rate": 0.0,
                         "status": "unavailable",
-                        "sessions_pooled": 0
+                        "success_rate": 0.0,
+                        "r200": 0,
+                        "r429": 0,
+                        "rother": 0,
                     }
-            
-            # Add stats for all resting proxies
-            for key, rest_info in self.proxy_balancer.resting_proxies.items():
-                if key not in proxy_stats:
+
+            for key in self.proxy_balancer.resting_proxies.keys():
+                if key in proxy_stats:
+                    proxy_stats[key]["status"] = "resting"
+                else:
                     proxy_stats[key] = {
                         "requests": 0,
                         "successes": 0,
                         "failures": 0,
-                        "overloads": 0,
-                        "total_overloads": 0,
-                        "success_rate": 0.0,
                         "status": "resting",
-                        "sessions_pooled": 0,
-                        "rest_reason": rest_info.get("reason", "unknown"),
-                        "rest_until": rest_info.get("rest_until", 0)
+                        "success_rate": 0.0,
+                        "r200": 0,
+                        "r429": 0,
+                        "rother": 0,
                     }
-                else:
-                    proxy_stats[key]["status"] = "resting"
-                    proxy_stats[key]["rest_reason"] = rest_info.get("reason", "unknown")
-                    proxy_stats[key]["rest_until"] = rest_info.get("rest_until", 0)
-            
+
             return {
                 "total_requests": total_requests,
                 "total_successes": total_successes,
                 "total_failures": total_failures,
                 "total_overloads": total_overloads,
+                "total_429": total_429,
                 "current_overloads": current_overloads,
-                "overall_success_rate": round((total_successes / (total_successes + total_failures) * 100) if (total_successes + total_failures) > 0 else 0, 2),
+                "overall_success_rate": round((total_successes / total_requests * 100) if total_requests > 0 else 0, 2),
                 "available_proxies_count": len(self.proxy_balancer.available_proxies),
                 "unavailable_proxies_count": len(self.proxy_balancer.unavailable_proxies),
                 "resting_proxies_count": len(self.proxy_balancer.resting_proxies),
@@ -124,36 +150,49 @@ class StatsReporter:
 
     def print_stats(self) -> None:
         stats = self.get_stats()
-        total_proxies = stats['available_proxies_count'] + stats['unavailable_proxies_count'] + stats['resting_proxies_count']
-        
-        print("\n" + "="*70)
+        total_proxies = (
+            stats['available_proxies_count']
+            + stats['unavailable_proxies_count']
+            + stats['resting_proxies_count']
+        )
+
+        print("\n" + "=" * 80)
         print("PROXY LOAD BALANCER STATISTICS")
-        print("="*70)
+        print("=" * 80)
         print(f"Algorithm: {stats['algorithm']}")
         print(f"Total Requests: {stats['total_requests']}")
         print(f"Total Successes: {stats['total_successes']}")
         print(f"Total Failures: {stats['total_failures']}")
         print(f"Total Overloads: {stats['total_overloads']}")
+        print(f"Total 429: {stats['total_429']}")
         print(f"Current Overloads: {stats['current_overloads']}")
         print(f"Overall Success Rate: {stats['overall_success_rate']}%")
         print(f"Total Proxies: {total_proxies}")
         print(f"Available Proxies: {stats['available_proxies_count']}")
         print(f"Unavailable Proxies: {stats['unavailable_proxies_count']}")
         print(f"Resting Proxies: {stats['resting_proxies_count']}")
-        
-        print(f"\nPER-PROXY STATISTICS ({len(stats['proxy_stats'])} proxies):")
-        print("-" * 70)
-        print(f"{'Proxy':<25} {'Requests':<10} {'Success':<10} {'Failures':<10} {'Rate':<8} {'Status':<12}")
-        print("-" * 70)
-        
-        sorted_proxies = sorted(stats['proxy_stats'].items(), 
-                               key=lambda x: (x[1]['status'] == 'unavailable', x[1]['status'] == 'resting', x[0]))
-        
+
+
+        problematic_proxies = [(key, proxy_stats) for key, proxy_stats in stats['proxy_stats'].items()]
+
+        print(f"\nPER-PROXY STATISTICS ({len(problematic_proxies)} problematic proxies):")
+        print("-" * 80)
+        print(f"{'Proxy':<25} {'Req':<6} {'200':<6} {'429':<6} {'Other':<7} {'Rate':<8} {'Status':<12}")
+        print("-" * 80)
+
+        sorted_proxies = sorted(
+                problematic_proxies,
+                key=lambda x: (
+                    x[1]['status'] == 'unavailable',
+                    x[1]['status'] == 'resting',
+                    x[0],
+                ),
+            )
+
         for proxy_key, proxy_stats in sorted_proxies:
-            print(f"{proxy_key:<25} {proxy_stats['requests']:<10} {proxy_stats['successes']:<10} "
-                  f"{proxy_stats['failures']:<10} {proxy_stats['success_rate']:<7}% {proxy_stats['status']:<12}")
-        
-        print("="*70)
+            print(f"{proxy_key:<25} {proxy_stats['requests']:<6} {proxy_stats.get('r200',0):<6} {proxy_stats.get('r429',0):<6} {proxy_stats.get('rother',0):<7} {proxy_stats['success_rate']:<7}% {proxy_stats['status']:<12}")
+
+        print("=" * 80)
 
     def print_compact_stats(self) -> None:
         if not self.proxy_balancer.verbose:
@@ -163,40 +202,22 @@ class StatsReporter:
         
         print(f"[{time.strftime('%H:%M:%S')}] Stats: {stats['total_requests']} reqs, "
               f"{stats['overall_success_rate']}% success, "
-              f"{stats['total_overloads']} overloads, "
+              f"{stats['total_429']} 429s, "
               f"{stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count'] + stats['resting_proxies_count']} proxies up")
         
-        print("Proxies: ", end="")
-        proxy_summaries = []
-        
-        sorted_proxies = sorted(stats['proxy_stats'].items(), 
-                               key=lambda x: (x[1]['status'] == 'unavailable', x[1]['status'] == 'resting', x[0]))
-        
-        for proxy_key, proxy_stats in sorted_proxies:
-            if proxy_stats['status'] == "available":
-                status_symbol = "✓"
-            elif proxy_stats['status'] == "resting":
-                rest_reason = proxy_stats.get('rest_reason', 'unknown')
-                if rest_reason == "overloaded":
-                    status_symbol = "🔥"  # Перегруженный прокси
-                else:
-                    status_symbol = "💤"  # Обычный отдых
-            else:
-                status_symbol = "✗"
-                
-            if proxy_stats['requests'] > 0:
-                proxy_summaries.append(f"{proxy_key}({proxy_stats['requests']}r/{proxy_stats['success_rate']}%{status_symbol})")
-            else:
-                proxy_summaries.append(f"{proxy_key}(0r{status_symbol})")
-        
-        print(" | ".join(proxy_summaries))
+
+        problematic_count = sum(1 for proxy_stats in stats['proxy_stats'].values())
+        if problematic_count > 0:
+            print(f"[{time.strftime('%H:%M:%S')}] {problematic_count} problematic proxies (see full stats for details)")
 
     def log_stats_summary(self) -> None:
         stats = self.get_stats()
+        
+        # Main proxy stats
         self.logger.info(f"Stats Summary - Requests: {stats['total_requests']}, "
                         f"Success Rate: {stats['overall_success_rate']}%, "
                         f"Available Proxies: {stats['available_proxies_count']}/{stats['available_proxies_count'] + stats['unavailable_proxies_count']}")
-
+        
     # Monitoring functionality
     def start_monitoring(self):
         if self.is_monitoring:
@@ -257,49 +278,49 @@ class StatsReporter:
                 self.logger.error(f"Error in monitoring loop: {str(e)}")
 
     def _collect_stats(self):
+        timestamp = time.time()
+        balancer_stats = self.get_stats()
+        with self.proxy_balancer.proxy_selection_lock:
+            available_list = list(self.proxy_balancer.available_proxies)
+            unavailable_list = list(self.proxy_balancer.unavailable_proxies)
+        all_proxies = available_list + unavailable_list
+        available_keys = set(ProxyManager.get_proxy_key(p) for p in available_list)
+        with self.proxy_balancer.stats_lock:
+            failure_map = {}
+            for proxy in all_proxies:
+                key = ProxyManager.get_proxy_key(proxy)
+                st = self.proxy_balancer.proxy_stats.get(key)
+                failure_map[key] = st.failure_count if st else 0
+        proxy_stats = []
+        for proxy in all_proxies:
+            proxy_key = ProxyManager.get_proxy_key(proxy)
+            is_available = proxy_key in available_keys
+            failures = failure_map.get(proxy_key, 0)
+            proxy_info = {
+                "host": proxy["host"],
+                "port": proxy["port"],
+                "status": "available" if is_available else "unavailable",
+                "failures": failures
+            }
+            proxy_stats.append(proxy_info)
+            if proxy_key not in self.proxy_stats:
+                self.proxy_stats[proxy_key] = {
+                    "total_failures": 0,
+                    "last_status_change": timestamp
+                }
+            if is_available != (self.proxy_stats[proxy_key].get("last_status", "") == "available"):
+                self.proxy_stats[proxy_key]["last_status_change"] = timestamp
+            self.proxy_stats[proxy_key]["last_status"] = "available" if is_available else "unavailable"
+            self.proxy_stats[proxy_key]["total_failures"] += failures - self.proxy_stats[proxy_key].get("last_failures", 0)
+            self.proxy_stats[proxy_key]["last_failures"] = failures
         with self.stats_lock:
-            balancer_stats = self.get_stats()
-            timestamp = time.time()
-            proxy_stats = []
-            
-            with self.proxy_balancer.proxy_selection_lock:
-                all_proxies = self.proxy_balancer.available_proxies + self.proxy_balancer.unavailable_proxies
-                for proxy in all_proxies:
-                    proxy_key = ProxyManager.get_proxy_key(proxy)
-                    is_available = proxy in self.proxy_balancer.available_proxies
-                    
-                    with self.proxy_balancer.stats_lock:
-                        stats = self.proxy_balancer.proxy_stats.get(proxy_key)
-                        failures = stats.failure_count if stats else 0
-                    
-                    proxy_info = {
-                        "host": proxy["host"],
-                        "port": proxy["port"],
-                        "status": "available" if is_available else "unavailable",
-                        "failures": failures
-                    }
-                    proxy_stats.append(proxy_info)
-                    
-                    if proxy_key not in self.proxy_stats:
-                        self.proxy_stats[proxy_key] = {
-                            "total_failures": 0,
-                            "last_status_change": timestamp
-                        }
-                    
-                    if is_available != (self.proxy_stats[proxy_key].get("last_status", "") == "available"):
-                        self.proxy_stats[proxy_key]["last_status_change"] = timestamp
-                    
-                    self.proxy_stats[proxy_key]["last_status"] = "available" if is_available else "unavailable"
-                    self.proxy_stats[proxy_key]["total_failures"] += failures - self.proxy_stats[proxy_key].get("last_failures", 0)
-                    self.proxy_stats[proxy_key]["last_failures"] = failures
-            
             snapshot = {
                 "timestamp": timestamp,
                 "balancer_stats": balancer_stats,
                 "proxy_stats": proxy_stats
             }
             self.stats_history.append(snapshot)
-            self.logger.debug(f"Stats collected: {len(proxy_stats)} proxies monitored")
+        self.logger.debug(f"Stats collected: {len(proxy_stats)} proxies monitored")
 
     def _cleanup_old_proxy_stats(self):
         current_time = time.time()

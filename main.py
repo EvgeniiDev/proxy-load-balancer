@@ -6,7 +6,7 @@ from proxy_load_balancer.config import ConfigManager
 
 
 def display_help():
-    print("HTTP Proxy Load Balancer")
+    print("HTTPS Proxy Load Balancer")
     print("")
     print("Usage:")
     print("    python main.py [-c config.json] [-v]")
@@ -35,7 +35,7 @@ def start_balancer(config_file: str, verbose: bool = False):
 
         config_manager.start_monitoring()
 
-        print(f"Starting proxy balancer on {config['server']['host']}:{config['server']['port']}")
+        print("Starting proxy balancer")
         print(f"Proxies: {len(config['proxies'])}")
         print(f"Config monitoring: enabled for {config_file}")
         if verbose:
@@ -58,7 +58,7 @@ def start_balancer(config_file: str, verbose: bool = False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HTTP Proxy Load Balancer", add_help=False)
+    parser = argparse.ArgumentParser(description="HTTPS Proxy Load Balancer", add_help=False)
     parser.add_argument("-c", "--config", default="config.json", help="Configuration file path")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message")

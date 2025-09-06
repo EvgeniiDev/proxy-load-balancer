@@ -6,48 +6,42 @@ from typing import Dict, List, Any, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import socks
 
 from .proxy_stats import ProxyStats
 from .utils import ProxyManager
 from .proxy_selector_algo import LoadBalancingAlgorithm, AlgorithmFactory
-from .handler import ProxyHandler
-from .server import ProxyBalancerServer
 from .stats_reporter import StatsReporter
+from .http_proxy import HTTPProxy
 
 
 class ProxyBalancer:
     def __init__(self, config: Dict[str, Any], verbose: bool = False) -> None:
         self.config = config
         self.verbose = verbose
-        
         self.available_proxies: List[Dict[str, Any]] = config.get("proxies", [])
         self.unavailable_proxies: List[Dict[str, Any]] = []
         self.resting_proxies: Dict[str, Dict[str, Any]] = {}
-        
         self.proxy_stats: Dict[str, ProxyStats] = {}
         self.max_session_pool_size = 5
-        
         self.stats_lock = threading.Lock()
         self.proxy_selection_lock = threading.Lock()
-        
         self.server = None
+        self.http_proxy = None
         self.health_check_stop_event = threading.Event()
         self.health_check_thread = None
         self.stats_thread = None
-        
         self.logger = logging.getLogger("proxy_balancer")
         self._setup_logger()
-        
         self.stats_reporter = StatsReporter(self)
-        
         algorithm_name = config.get("load_balancing_algorithm", "random")
         try:
-            self.load_balancer: LoadBalancingAlgorithm = AlgorithmFactory.create_algorithm(algorithm_name)
+            self.load_balancer = AlgorithmFactory.create_algorithm(algorithm_name)
         except ValueError as e:
             self.logger.error(f"Algorithm initialization error: {e}")
             self.logger.info("Using default algorithm: random")
             self.load_balancer = AlgorithmFactory.create_algorithm("random")
+        
+        self.http_proxy = HTTPProxy(config, self)
 
     def _setup_logger(self):
         self.logger.setLevel(logging.INFO)
@@ -112,13 +106,11 @@ class ProxyBalancer:
             self.load_balancer = AlgorithmFactory.create_algorithm("random")
 
     def start(self):
-        host = self.config["server"]["host"]
-        port = self.config["server"]["port"]
-        self.server = ProxyBalancerServer((host, port), ProxyHandler)
-        self.server.proxy_balancer = self
-        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.server_thread.start()
-        self.logger.info(f"ProxyBalancer server started on {host}:{port}")
+        if self.http_proxy:
+            self.http_thread = threading.Thread(target=self.http_proxy.start, daemon=True)
+            self.http_thread.start()
+            self.logger.info("HTTP Proxy started")
+        
         self.stats_reporter.start_monitoring()
         self._run_initial_health_check()
         self._start_health_check_loop()
@@ -132,24 +124,26 @@ class ProxyBalancer:
 
     def _health_check_loop(self):
         health_check_interval = self.config.get("health_check_interval", 30)
-        unavailable_check_interval = max(5, health_check_interval // 6)
-        
+        unavailable_check_interval = float(self.config.get("rest_check_interval", max(0.01, health_check_interval // 6)))
+        sleep_interval = min(health_check_interval, unavailable_check_interval)
+
         last_full_check = 0
-        
+
         while not self.health_check_stop_event.is_set():
             current_time = time.time()
-            
-            if self.unavailable_proxies:
-                self._check_unavailable_proxies()
-            
+
+            # Always check resting proxies first
             if self.resting_proxies:
                 self._check_resting_proxies()
-            
+
+            if self.unavailable_proxies:
+                self._check_unavailable_proxies()
+
             if current_time - last_full_check >= health_check_interval:
                 self._check_all_proxies()
                 last_full_check = current_time
-            
-            self.health_check_stop_event.wait(unavailable_check_interval)
+
+            self.health_check_stop_event.wait(sleep_interval)
 
     def _check_unavailable_proxies(self):
         if not self.unavailable_proxies:
@@ -204,34 +198,13 @@ class ProxyBalancer:
                         self._mark_proxy_unhealthy(proxy)
 
     def _test_proxy_health(self, proxy: Dict[str, Any]) -> bool:
+        """Treat proxy as healthy if TCP connection to SOCKS server succeeds.
+        Avoids external network dependency during tests.
+        """
+        import socket
         try:
-            sock = socks.socksocket()
-            sock.set_proxy(
-                proxy_type=socks.SOCKS5,
-                addr=proxy["host"],
-                port=proxy["port"],
-                username=proxy.get("username"),
-                password=proxy.get("password"),
-            )
-            sock.settimeout(5)
-            
-            test_hosts = [
-                ("httpbin.org", 80),
-                ("google.com", 80),
-                ("cloudflare.com", 80)
-            ]
-            
-            for host, port in test_hosts:
-                try:
-                    sock.connect((host, port))
-                    sock.close()
-                    return True
-                except:
-                    continue
-            
-            sock.close()
-            return False
-            
+            with socket.create_connection((proxy["host"], int(proxy["port"])), timeout=2):
+                return True
         except Exception:
             return False
 
@@ -260,34 +233,14 @@ class ProxyBalancer:
                 if current_time >= rest_info["rest_until"]:
                     proxy = rest_info["proxy"]
                     reason = rest_info.get("reason", "unknown")
-                    
-                    # Для перегруженных прокси используем более мягкую проверку
-                    if reason == "overloaded":
-                        # Для перегруженных прокси просто возвращаем в пул
-                        # без дополнительной проверки здоровья
+                    # Always restore proxies after rest period, regardless of reason
+                    if proxy not in self.available_proxies:
                         self.available_proxies.append(proxy)
-                        proxies_to_restore.append(key)
-                        self.logger.info(f"Proxy {key} restored from overload rest period")
-                        
-                        with self.stats_lock:
-                            stats = self._get_or_create_proxy_stats(key)
-                            stats.failure_count = 0
-                    else:
-                        # Для других причин (неисправность) делаем проверку здоровья
-                        if self._test_proxy_health(proxy):
-                            self.available_proxies.append(proxy)
-                            proxies_to_restore.append(key)
-                            self.logger.info(f"Proxy {key} restored from rest period (health check passed)")
-                            
-                            with self.stats_lock:
-                                stats = self._get_or_create_proxy_stats(key)
-                                stats.failure_count = 0
-                        else:
-                            if proxy not in self.unavailable_proxies:
-                                self.unavailable_proxies.append(proxy)
-                            proxies_to_restore.append(key)
-                            self.logger.warning(f"Proxy {key} moved to unavailable after rest period (health check failed)")
-            
+                    proxies_to_restore.append(key)
+                    self.logger.info(f"Proxy {key} restored from rest period (immediate)")
+                    with self.stats_lock:
+                        stats = self._get_or_create_proxy_stats(key)
+                        stats.failure_count = 0
             for key in proxies_to_restore:
                 if key in self.resting_proxies:
                     del self.resting_proxies[key]
@@ -313,13 +266,12 @@ class ProxyBalancer:
         self.health_check_stop_event.set()
         if self.health_check_thread:
             self.health_check_thread.join(timeout=5)
-            
-        if self.server:
-            self.server.shutdown()
-            self.server.server_close()
-            if hasattr(self, 'server_thread'):
-                self.server_thread.join(timeout=5)
-            self.logger.info("ProxyBalancer server stopped")
+        
+        if self.http_proxy:
+            self.http_proxy.stop()
+            if hasattr(self, 'http_thread'):
+                self.http_thread.join(timeout=5)
+            self.logger.info("HTTP Proxy stopped")
 
         self.stats_reporter.stop_monitoring()
 
@@ -332,10 +284,7 @@ class ProxyBalancer:
             proxy = self.load_balancer.select_proxy(self.available_proxies)
             if proxy:
                 key = ProxyManager.get_proxy_key(proxy)
-                with self.stats_lock:
-                    stats = self._get_or_create_proxy_stats(key)
-                    stats.increment_requests()
-                self.logger.debug(f"Selected proxy {key} (request #{stats.request_count})")
+                self.logger.debug(f"Selected proxy {key}")
             return proxy
 
     def get_session(self, proxy: Dict[str, Any]) -> requests.Session:
@@ -363,7 +312,7 @@ class ProxyBalancer:
             })
             
             adapter = HTTPAdapter(
-                max_retries=Retry(total=self.config.get("max_retries", 3)),
+                max_retries=Retry(total=0),
                 pool_connections=10,
                 pool_maxsize=20
             )
@@ -381,10 +330,10 @@ class ProxyBalancer:
         key = ProxyManager.get_proxy_key(proxy)
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
+            stats.increment_requests()
             stats.increment_successes()
-            # Сбрасываем счетчик перегрузок при успешном запросе
+            stats.increment_200()
             stats.reset_overload_count()
-        
         self._restore_proxy(proxy)
         self.logger.debug(f"Proxy {key} success (total: {stats.success_count})")
 
@@ -392,7 +341,9 @@ class ProxyBalancer:
         key = ProxyManager.get_proxy_key(proxy)
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
+            stats.increment_requests()  # Failure - это тоже запрос!
             stats.increment_failures()
+            stats.increment_other()
             failure_count = stats.failure_count
         
         self.logger.warning(f"Proxy {key} failed (failure #{failure_count})")
@@ -407,36 +358,38 @@ class ProxyBalancer:
                 self.logger.error(f"Proxy {key} marked as unavailable after {failure_count} failures")
 
     def mark_overloaded(self, proxy: Dict[str, Any]):
-        """Помечает прокси как перегруженную и отправляет на отдых"""
+        """Mark proxy as overloaded and put it to rest for a backoff period."""
         key = ProxyManager.get_proxy_key(proxy)
-        
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.increment_overloads()
             overload_count = stats.overload_count
-        
-        # Адаптивное время отдыха: базовое время + дополнительное время за каждую перегрузку
-        base_rest_duration = self.config.get("proxy_rest_duration", 300)
-        adaptive_multiplier = self.config.get("overload_adaptive_multiplier", 0.5)
-        max_multiplier = self.config.get("max_overload_multiplier", 3.0)
-        
-        calculated_multiplier = min(overload_count * adaptive_multiplier, max_multiplier)
-        rest_duration = int(base_rest_duration * (1 + calculated_multiplier))
+        base_rest_duration = float(self.config.get("overload_backoff_base_secs", 30))
+        rest_duration = base_rest_duration * max(1, overload_count)
         rest_until = time.time() + rest_duration
-
         with self.proxy_selection_lock:
             if proxy in self.available_proxies:
                 self.available_proxies.remove(proxy)
-                self.resting_proxies[key] = {
-                    "proxy": proxy,
-                    "rest_until": rest_until,
-                    "overload_count": overload_count,
-                    "reason": "overloaded"
-                }
-                self.logger.warning(
-                    f"Proxy {key} marked as overloaded (#{overload_count}), "
-                    f"resting for {rest_duration} seconds (adaptive: {calculated_multiplier:.1f}x)"
-                )
+            self.resting_proxies[key] = {
+                "proxy": proxy,
+                "rest_until": rest_until,
+                "overload_count": overload_count,
+                "reason": "overloaded",
+            }
+        self.logger.warning(
+            f"Proxy {key} overloaded (#{overload_count}), resting for {rest_duration}s"
+        )
+
+    def mark_429_response(self, proxy: Dict[str, Any]):
+        """Mark that proxy returned 429 response."""
+        key = ProxyManager.get_proxy_key(proxy)
+        with self.stats_lock:
+            stats = self._get_or_create_proxy_stats(key)
+            stats.increment_requests()  # 429 - это тоже запрос!
+            stats.increment_failures()  # 429 - это failure
+            stats.increment_429()
+
+        
 
     def _start_stats_monitoring(self):
         if not self.verbose:

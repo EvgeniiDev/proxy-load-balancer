@@ -1,9 +1,7 @@
 from .proxy_balancer import ProxyBalancer
 from .balancer import Balancer
 from .proxy_stats import ProxyStats
-from .handler import ProxyHandler
 from .stats_reporter import StatsReporter
-from .server import ProxyBalancerServer
 from .utils import ProxyManager
 from .config import ConfigManager
 import threading
@@ -20,7 +18,7 @@ def run_balancer_daemon(config_file: str = "config.json", verbose: bool = False)
     config_manager.add_change_callback(on_config_change)
     config_manager.start_monitoring()
     if verbose:
-        print(f"Starting proxy balancer on {config['server']['host']}:{config['server']['port']}")
+        print(f"Starting proxy balancer")
         print(f"Proxies: {len(config['proxies'])}")
         print(f"Config monitoring: enabled for {config_file}")
         print("Verbose mode enabled")
@@ -32,5 +30,4 @@ def run_balancer_daemon(config_file: str = "config.json", verbose: bool = False)
         config_manager.stop_monitoring()
         balancer.stop()
 
-__all__ = ["ProxyBalancer", "ProxyBalancerServer",
-           "ProxyHandler", "ProxyManager", "StatsReporter", "run_balancer_daemon"]
+__all__ = ["ProxyBalancer", "ProxyManager", "StatsReporter", "run_balancer_daemon"]
