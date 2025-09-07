@@ -163,15 +163,21 @@ class MockSocks5Server:
                             break
                         buffer += chunk
                     
-                    # Возвращаем фиксированный код ответа
+                    # Обрабатываем специальные коды
                     code = self.fixed_response_code
-                    if code == 429:
+                    
+                    if code == -1:
+                        # Некорректный ответ
+                        client_socket.sendall(b"HTTP/1.1 MALFORMED RESPONSE\r\n\r\n")
+                        return True
+                    elif code == 429:
                         reason = 'Too Many Requests'
                         body = b''
                     else:
                         reason = 'OK'
                         body = b'{"ok": true}'
                         code = 200
+                    
                     headers = [
                         f"HTTP/1.1 {code} {reason}\r\n".encode('utf-8'),
                         f"Content-Length: {len(body)}\r\n".encode('utf-8'),
@@ -452,3 +458,38 @@ class MockSocks5ServerManager:
                 server.fixed_response_code = mapping[server.port]
             else:
                 server.fixed_response_code = None
+    
+    def stop_server(self, port: int):
+        """Останавливает сервер с указанным портом"""
+        for server in self.servers:
+            if server.port == port:
+                server.stop()
+                self.stopped_ports.add(port)
+                self.servers.remove(server)
+                break
+    
+    def restart_server(self, port: int):
+        """Перезапускает сервер с указанным портом"""
+        # Если сервер был остановлен, создаем новый
+        if port in self.stopped_ports:
+            server = MockSocks5Server('127.0.0.1', port)
+            server.start()
+            self.servers.append(server)
+            self.stopped_ports.remove(port)
+    
+    def reset_stats(self):
+        """Сбрасывает статистику всех серверов"""
+        for server in self.servers:
+            server.reset_stats()
+        # Сбрасываем счетчики для остановленных серверов
+        self.stopped_ports.clear()
+    
+    def set_malformed_responses(self, port: int, enabled: bool):
+        """Настраивает сервер на возврат некорректных ответов"""
+        for server in self.servers:
+            if server.port == port:
+                if enabled:
+                    server.fixed_response_code = -1  # Специальный код для некорректных ответов
+                else:
+                    server.fixed_response_code = None
+                break

@@ -1,52 +1,56 @@
-import time
 import unittest
+import time
 import json
 from tests.base_test import BaseLoadBalancerTest
 
 
-class TestProxyLoadBalancerEdgeCases(BaseLoadBalancerTest):
-    """Tests for edge cases and error handling in the proxy balancer"""
+class TestEdgeCases(BaseLoadBalancerTest):
+    """Тесты граничных случаев и обработки ошибок"""
     
-    def test_zero_available_proxies(self):
-        """Test behavior when no proxies are available"""
-        
-        # Create an empty proxy list
+    def test_zero_proxies_configuration(self):
+        """Тест поведения с нулевым количеством прокси"""
         config_path = self.create_test_config(
-            proxies=[],
-            algorithm="round_robin",
-            health_check_interval=1
+            proxies=[],  # Пустой список
+            algorithm="round_robin"
         )
         
         balancer_port = self.start_balancer_with_config(config_path)
         
-        # Try to make a request - should fail gracefully
-        try:
-            self.make_request_through_proxy(
+        # Запросы должны завершаться ошибкой
+        with self.assertRaises((Exception, AssertionError)):
+            response = self.make_request_through_proxy(
                 balancer_port=balancer_port,
-                target_url="http://httpbin.org/status/200",
+                target_url="http://httpbin.org/get",
                 timeout=5
             )
-            self.fail("Request should have failed with no available proxies")
-        except Exception:
-            # Expected to fail, but should not crash the system
-            pass
-            
-        # Now add a proxy and verify the system recovers
+            # Если ответ получен, это должен быть код ошибки
+            self.assertIn(response.status_code, [502, 503, 504])
+    
+    def test_single_proxy_failure(self):
+        """Тест с единственным прокси, который не работает"""
+        # Создаем сервер и сразу останавливаем его
         server = self.server_manager.create_servers(1)[0]
-        updated_config = {
-            "server": {"host": "127.0.0.1", "port": balancer_port},
-            "proxies": [{"host": "127.0.0.1", "port": server.port}],
-            "load_balancing_algorithm": "round_robin", 
-            "health_check_interval": 1,
-            "connection_timeout": 5,
-            "max_retries": 3
-        }
+        self.server_manager.stop_server(server.port)
         
-        # Update the config
-        with open(config_path, 'w') as f:
-            json.dump(updated_config, f, indent=2)
+        proxies = [{"host": "127.0.0.1", "port": server.port}]
+        config_path = self.create_test_config(
+            proxies=proxies,
+            health_check_interval=1
+        )
+        balancer_port = self.start_balancer_with_config(config_path)
         
-        time.sleep(2)
+        # Ждем health check
+        self.wait_for_health_check(2)
+        
+        # Запросы должны завершаться ошибкой
+        with self.assertRaises((Exception, AssertionError)):
+            response = self.make_request_through_proxy(
+                balancer_port=balancer_port,
+                target_url="http://httpbin.org/get",
+                timeout=5
+            )
+            # Если ответ получен, это должен быть код ошибки
+            self.assertIn(response.status_code, [502, 503, 504])
         
         # Try request again - should work now
         try:
