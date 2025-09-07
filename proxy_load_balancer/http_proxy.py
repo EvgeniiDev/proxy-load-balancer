@@ -208,7 +208,62 @@ class HTTPProxy:
                 pass
 
     def _handle_http_request(self, client_socket: socket.socket, method: str, url: str, version: str, headers: Dict[str, str]):
-        self._send_error(client_socket, 405, "Method Not Allowed")
+        """Обрабатывает HTTP запросы (не CONNECT)"""
+        start_time = time.time()
+        status_code = 0
+        
+        try:
+            # Читаем тело запроса если есть
+            body = b""
+            content_length = headers.get('content-length')
+            if content_length:
+                try:
+                    body_length = int(content_length)
+                    body = client_socket.recv(body_length)
+                except:
+                    pass
+            
+            # Парсим URL
+            from urllib.parse import urlparse
+            parsed_url = urlparse(url)
+            
+            if parsed_url.hostname:
+                # Полный URL
+                target_host = parsed_url.hostname
+                target_port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
+                path = parsed_url.path or '/'
+                if parsed_url.query:
+                    path += '?' + parsed_url.query
+            else:
+                # Относительный URL, используем Host header
+                host_header = headers.get('host', '').strip()
+                if ':' in host_header:
+                    target_host, port_str = host_header.rsplit(':', 1)
+                    target_port = int(port_str)
+                else:
+                    target_host = host_header
+                    target_port = 80
+                path = url
+            
+            self.logger.info(f"HTTP request: {method} {target_host}:{target_port}{path}")
+            
+            # Пробуем переслать запрос через доступные прокси
+            response = self._forward_http_request(method, target_host, target_port, path, headers, body)
+            
+            if response:
+                status_code, response_headers, response_body = response
+                self._send_http_response_plain(client_socket, response)
+            else:
+                status_code = 503
+                self._send_error(client_socket, 503, "Service Unavailable")
+                
+        except Exception as e:
+            self.logger.error(f"Error in HTTP request handler: {e}")
+            status_code = 500
+            self._send_error(client_socket, 500, "Internal Server Error")
+        finally:
+            response_time = time.time() - start_time
+            self.logger.info(f"HTTP {method} {target_host}:{target_port} completed with status {status_code} in {response_time:.2f}s")
 
     def _send_error(self, client_socket: socket.socket, status_code: int, message: str):
         try:
@@ -529,6 +584,27 @@ class HTTPProxy:
             remaining_data = remaining_data[chunk_size + 2:]
             
         return body
+
+    def _send_http_response_plain(self, client_socket, response: Tuple[int, Dict[str, str], bytes]):
+        """Отправляет HTTP ответ через обычный (не SSL) сокет"""
+        try:
+            status_code, headers, body = response
+            
+            status_text = "OK" if status_code == 200 else "Error"
+            response_line = f"HTTP/1.1 {status_code} {status_text}\r\n"
+            client_socket.send(response_line.encode('utf-8'))
+            
+            for key, value in headers.items():
+                header_line = f"{key}: {value}\r\n"
+                client_socket.send(header_line.encode('utf-8'))
+            
+            client_socket.send(b"\r\n")
+            
+            if body:
+                client_socket.send(body)
+                
+        except Exception as e:
+            self.logger.error(f"Error sending HTTP response: {e}")
 
     def _send_http_response(self, ssl_socket, response: Tuple[int, Dict[str, str], bytes]):
         try:

@@ -108,8 +108,8 @@ class BaseLoadBalancerTest(unittest.TestCase):
         """Делает HTTP запрос через прокси балансировщик"""
         
         proxies = {
-            'http': f'https://{balancer_host}:{balancer_port}',
-            'https': f'https://{balancer_host}:{balancer_port}'
+            'http': f'http://{balancer_host}:{balancer_port}',
+            'https': f'http://{balancer_host}:{balancer_port}'
         }
         req_headers = dict(headers or {})
         if target_url.startswith('https://'):

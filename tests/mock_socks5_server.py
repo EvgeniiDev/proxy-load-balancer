@@ -152,32 +152,40 @@ class MockSocks5Server:
         """Проксирует данные к реальному серверу. Возвращает True при успехе."""
         try:
             if self.fixed_response_code is not None:
-                # Simulate recovery: first request to /status/429 returns 429, then 200 after rest
-                if not hasattr(self, '_429_given'):
-                    self._429_given = False
-                code = self.fixed_response_code
-                if code == 429 and not self._429_given:
-                    reason = 'Too Many Requests'
-                    body = b''
-                    self._429_given = True
-                else:
-                    reason = 'OK'
-                    body = b'ok'
-                    code = 200
-                headers = [
-                    f"HTTP/1.1 {code} {reason}\r\n".encode('utf-8'),
-                    f"Content-Length: {len(body)}\r\n".encode('utf-8'),
-                    b"Connection: close\r\n",
-                    b"\r\n",
-                ]
+                # Читаем HTTP запрос
                 try:
+                    client_socket.settimeout(5.0)
+                    buffer = b""
+                    # Read until end of headers
+                    while b"\r\n\r\n" not in buffer:
+                        chunk = client_socket.recv(4096)
+                        if not chunk:
+                            break
+                        buffer += chunk
+                    
+                    # Возвращаем фиксированный код ответа
+                    code = self.fixed_response_code
+                    if code == 429:
+                        reason = 'Too Many Requests'
+                        body = b''
+                    else:
+                        reason = 'OK'
+                        body = b'{"ok": true}'
+                        code = 200
+                    headers = [
+                        f"HTTP/1.1 {code} {reason}\r\n".encode('utf-8'),
+                        f"Content-Length: {len(body)}\r\n".encode('utf-8'),
+                        b"Content-Type: application/json\r\n",
+                        b"Connection: close\r\n",
+                        b"\r\n",
+                    ]
                     for h in headers:
                         client_socket.sendall(h)
                     if body:
                         client_socket.sendall(body)
-                except Exception:
-                    pass
-                return True
+                    return True
+                except Exception as e:
+                    return False
 
             # Try to emulate basic httpbin.org behavior without external network
             try:
