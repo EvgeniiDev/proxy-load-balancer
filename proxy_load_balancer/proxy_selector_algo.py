@@ -1,21 +1,32 @@
 import random
 import threading
-from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
-class LoadBalancingAlgorithm(ABC):
-    def __init__(self):
-        self.lock = threading.Lock()
-        
-    @abstractmethod
-    def select_proxy(self, available_proxies: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        pass
+from .base import Logger
 
-    @abstractmethod
+
+class LoadBalancingAlgorithm:
+    """Базовый класс для алгоритмов балансировки нагрузки."""
+    
+    def __init__(self, name: str):
+        self.logger = Logger.get_logger(f"algorithm_{name}")
+        self._lock = threading.Lock()
+        
+    def select_proxy(self, available_proxies: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Выбор прокси из доступных."""
+        raise NotImplementedError
+
     def reset(self) -> None:
-        pass
+        """Сброс состояния алгоритма."""
+        raise NotImplementedError
+
 
 class RandomAlgorithm(LoadBalancingAlgorithm):
+    """Алгоритм случайного выбора прокси."""
+    
+    def __init__(self):
+        super().__init__("random")
+    
     def select_proxy(self, available_proxies: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not available_proxies:
             return None
@@ -24,24 +35,28 @@ class RandomAlgorithm(LoadBalancingAlgorithm):
     def reset(self) -> None:
         pass
 
+
 class RoundRobinAlgorithm(LoadBalancingAlgorithm):
+    """Алгоритм циклического выбора прокси."""
+    
     def __init__(self):
-        super().__init__()
-        self.current_index = 0
+        super().__init__("round_robin")
+        self._current_index = 0
 
     def select_proxy(self, available_proxies: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not available_proxies:
             return None
-        with self.lock:
-            if self.current_index >= len(available_proxies):
-                self.current_index = 0
-            selected_proxy = available_proxies[self.current_index]
-            self.current_index = (self.current_index + 1) % len(available_proxies)
+            
+        with self._lock:
+            if self._current_index >= len(available_proxies):
+                self._current_index = 0
+            selected_proxy = available_proxies[self._current_index]
+            self._current_index = (self._current_index + 1) % len(available_proxies)
             return selected_proxy
         
     def reset(self) -> None:
-        with self.lock:
-            self.current_index = 0
+        with self._lock:
+            self._current_index = 0
             
 class AlgorithmFactory:
     _algorithms = {

@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 from proxy_load_balancer.proxy_balancer import ProxyBalancer
 from proxy_load_balancer.proxy_stats import ProxyStats
 from proxy_load_balancer.stats_reporter import StatsReporter
-from proxy_load_balancer.utils import ProxyManager
+from proxy_load_balancer.base import ProxyHandler
 
 
 class TestMemoryManagement(unittest.TestCase):
@@ -42,7 +42,7 @@ class TestMemoryManagement(unittest.TestCase):
         balancer.proxy_stats["old_proxy_2"].failure_count = 10
         
         # Cleanup with current proxy keys (which don't include old proxies)
-        current_proxy_keys = set(ProxyManager.get_proxy_key(proxy) for proxy in balancer.available_proxies)
+        current_proxy_keys = set(ProxyHandler.get_proxy_key(proxy) for proxy in balancer.available_proxies)
         balancer._cleanup_old_proxy_data(current_proxy_keys)
         
         # Check that old proxy stats are removed

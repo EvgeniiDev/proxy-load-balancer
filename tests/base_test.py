@@ -41,7 +41,7 @@ class BaseLoadBalancerTest(unittest.TestCase):
                           proxies: List[Dict[str, Any]], 
                           algorithm: str = "round_robin",
                           server_port: int = 0,
-                          health_check_interval: int = 1,
+                          health_check_interval: int = 9999,  # Очень большой интервал для тестов
                           connection_timeout: int = 5,
                           max_retries: int = 3,
                           **extra) -> str:

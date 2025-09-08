@@ -149,10 +149,14 @@ class TestHttpMethods(BaseLoadBalancerTest):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         
-        # Проверяем, что заголовки были переданы
+        # Проверяем, что заголовки были переданы (заголовки могут быть в нижнем регистре)
         received_headers = data["headers"]
-        self.assertIn("X-Custom-Header", received_headers)
-        self.assertEqual(received_headers["X-Custom-Header"], "test-value")
+        # Convert headers to case-insensitive lookup
+        headers_lower = {k.lower(): v for k, v in received_headers.items()}
+        self.assertIn("x-custom-header", headers_lower)
+        self.assertEqual(headers_lower["x-custom-header"], "test-value")
+        self.assertIn("authorization", headers_lower)
+        self.assertEqual(headers_lower["authorization"], "Bearer token123")
     
     def test_http_with_query_parameters(self):
         """Тест HTTP запроса с параметрами запроса"""

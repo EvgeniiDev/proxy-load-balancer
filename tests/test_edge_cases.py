@@ -16,15 +16,13 @@ class TestEdgeCases(BaseLoadBalancerTest):
         
         balancer_port = self.start_balancer_with_config(config_path)
         
-        # Запросы должны завершаться ошибкой
-        with self.assertRaises((Exception, AssertionError)):
-            response = self.make_request_through_proxy(
-                balancer_port=balancer_port,
-                target_url="http://httpbin.org/get",
-                timeout=5
-            )
-            # Если ответ получен, это должен быть код ошибки
-            self.assertIn(response.status_code, [502, 503, 504])
+        # Запросы должны возвращать 503 Service Unavailable
+        response = self.make_request_through_proxy(
+            balancer_port=balancer_port,
+            target_url="http://httpbin.org/get",
+            timeout=5
+        )
+        self.assertEqual(response.status_code, 503)
     
     def test_single_proxy_failure(self):
         """Тест с единственным прокси, который не работает"""
@@ -42,26 +40,21 @@ class TestEdgeCases(BaseLoadBalancerTest):
         # Ждем health check
         self.wait_for_health_check(2)
         
-        # Запросы должны завершаться ошибкой
-        with self.assertRaises((Exception, AssertionError)):
-            response = self.make_request_through_proxy(
-                balancer_port=balancer_port,
-                target_url="http://httpbin.org/get",
-                timeout=5
-            )
-            # Если ответ получен, это должен быть код ошибки
-            self.assertIn(response.status_code, [502, 503, 504])
+        # Запросы должны возвращать 503 Service Unavailable
+        response = self.make_request_through_proxy(
+            balancer_port=balancer_port,
+            target_url="http://httpbin.org/get",
+            timeout=5
+        )
+        self.assertEqual(response.status_code, 503)
         
-        # Try request again - should work now
-        try:
-            response = self.make_request_through_proxy(
-                balancer_port=balancer_port,
-                target_url="http://httpbin.org/status/200",
-                timeout=5
-            )
-            self.assertEqual(response.status_code, 200)
-        except Exception as e:
-            self.fail(f"Request should have succeeded after adding proxy: {e}")
+        # Повторный запрос также должен возвращать 503, пока прокси не восстановлен
+        response = self.make_request_through_proxy(
+            balancer_port=balancer_port,
+            target_url="http://httpbin.org/status/200",
+            timeout=5
+        )
+        self.assertEqual(response.status_code, 503)
     
     def test_max_retries_behavior(self):
         """Test that max_retries setting is respected"""

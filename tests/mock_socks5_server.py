@@ -152,36 +152,40 @@ class MockSocks5Server:
         """Проксирует данные к реальному серверу. Возвращает True при успехе."""
         try:
             if self.fixed_response_code is not None:
-                # Читаем HTTP запрос
                 try:
                     client_socket.settimeout(5.0)
                     buffer = b""
-                    # Read until end of headers
                     while b"\r\n\r\n" not in buffer:
                         chunk = client_socket.recv(4096)
                         if not chunk:
                             break
                         buffer += chunk
-                    
-                    # Обрабатываем специальные коды
-                    code = self.fixed_response_code
-                    
-                    if code == -1:
-                        # Некорректный ответ
+
+                    code = int(self.fixed_response_code)
+                    reason_map = {
+                        200: 'OK',
+                        201: 'Created',
+                        204: 'No Content',
+                        400: 'Bad Request',
+                        404: 'Not Found',
+                        429: 'Too Many Requests',
+                        500: 'Internal Server Error',
+                    }
+                    reason = reason_map.get(code, 'OK' if 200 <= code < 300 else 'Error')
+                    if code in (204,):
+                        body = b''
+                    elif code == -1:
                         client_socket.sendall(b"HTTP/1.1 MALFORMED RESPONSE\r\n\r\n")
                         return True
                     elif code == 429:
-                        reason = 'Too Many Requests'
                         body = b''
                     else:
-                        reason = 'OK'
                         body = b'{"ok": true}'
-                        code = 200
-                    
+
                     headers = [
                         f"HTTP/1.1 {code} {reason}\r\n".encode('utf-8'),
-                        f"Content-Length: {len(body)}\r\n".encode('utf-8'),
                         b"Content-Type: application/json\r\n",
+                        f"Content-Length: {len(body)}\r\n".encode('utf-8'),
                         b"Connection: close\r\n",
                         b"\r\n",
                     ]
@@ -190,7 +194,7 @@ class MockSocks5Server:
                     if body:
                         client_socket.sendall(body)
                     return True
-                except Exception as e:
+                except Exception:
                     return False
 
             # Try to emulate basic httpbin.org behavior without external network
@@ -221,27 +225,47 @@ class MockSocks5Server:
                             content_length = int(hdrs.get('content-length', '0') or '0')
                             body = body_remainder
                             # Read remaining body if not fully read
-                            while len(body) < content_length:
-                                more = client_socket.recv(min(4096, content_length - len(body)))
-                                if not more:
-                                    break
-                                body += more
+                            if content_length > 0:
+                                try:
+                                    if content_length > 512 * 1024:
+                                        client_socket.settimeout(20.0)
+                                except Exception:
+                                    pass
+                                while len(body) < content_length:
+                                    more = client_socket.recv(min(65536, content_length - len(body)))
+                                    if not more:
+                                        break
+                                    body += more
 
                             status_code = 200
                             resp_obj = None
+                            
+                            # Parse query parameters
+                            url_parts = url.split('?', 1)
+                            base_url = url_parts[0]
+                            query_args = {}
+                            if len(url_parts) > 1:
+                                query_string = url_parts[1]
+                                for param in query_string.split('&'):
+                                    if '=' in param:
+                                        key, value = param.split('=', 1)
+                                        query_args[key] = value
+                                    else:
+                                        query_args[param] = ""
+                            
                             # Emulate /status/<code>
-                            if '/status/' in url:
+                            if '/status/' in base_url:
                                 # Always emulate /status/429 and /status/200 for overload tests
-                                if url.endswith('/429'):
+                                if base_url.endswith('/429'):
                                     status_code = 429
-                                elif url.endswith('/200'):
+                                elif base_url.endswith('/200'):
                                     status_code = 200
                                 else:
                                     try:
-                                        status_code = int(url.rsplit('/', 1)[-1])
+                                        status_code = int(base_url.rsplit('/', 1)[-1])
                                     except Exception:
                                         status_code = 200
-                            elif method == 'GET' and ('httpbin.org/get' in url or '/get' in url):
+                            elif method == 'GET' and ('httpbin.org/get' in base_url or '/get' in base_url):
                                 host_hdr = hdrs.get('host', '')
                                 if url.startswith('http://') or url.startswith('https://'):
                                     full_url = url
@@ -251,15 +275,133 @@ class MockSocks5Server:
                                         full_url = f"{scheme}://{host_hdr}{url}"
                                     else:
                                         full_url = url
-                                resp_obj = {"url": full_url}
-                            elif method in ('POST', 'PUT') and (('httpbin.org/post' in url or '/post' in url) or ('httpbin.org/put' in url or '/put' in url)):
+                                # Mock httpbin.org/get response structure
+                                resp_obj = {
+                                    "args": query_args,
+                                    "headers": dict(hdrs),
+                                    "origin": "127.0.0.1",
+                                    "url": full_url
+                                }
+                            elif method == 'GET' and ('httpbin.org/headers' in base_url or '/headers' in base_url):
+                                host_hdr = hdrs.get('host', '')
+                                if url.startswith('http://') or url.startswith('https://'):
+                                    full_url = url
+                                else:
+                                    scheme = 'https' if hdrs.get('x-forwarded-proto', '').lower() == 'https' else 'http'
+                                    if host_hdr:
+                                        full_url = f"{scheme}://{host_hdr}{url}"
+                                    else:
+                                        full_url = url
+                                # Mock httpbin.org/headers response structure
+                                resp_obj = {
+                                    "headers": dict(hdrs)
+                                }
+                            elif method == 'GET' and ('httpbin.org/gzip' in base_url or '/gzip' in base_url):
+                                host_hdr = hdrs.get('host', '')
+                                if url.startswith('http://') or url.startswith('https://'):
+                                    full_url = url
+                                else:
+                                    scheme = 'https' if hdrs.get('x-forwarded-proto', '').lower() == 'https' else 'http'
+                                    if host_hdr:
+                                        full_url = f"{scheme}://{host_hdr}{url}"
+                                    else:
+                                        full_url = url
+                                # Mock httpbin.org/gzip response structure
+                                resp_obj = {
+                                    "args": query_args,
+                                    "headers": dict(hdrs),
+                                    "origin": "127.0.0.1",
+                                    "url": full_url,
+                                    "gzipped": True
+                                }
+                            elif method == 'GET' and ('httpbin.org/redirect' in base_url or '/redirect' in base_url):
+                                # Simulate redirect response - just return the final GET response
+                                host_hdr = hdrs.get('host', '')
+                                if url.startswith('http://') or url.startswith('https://'):
+                                    full_url = url
+                                else:
+                                    scheme = 'https' if hdrs.get('x-forwarded-proto', '').lower() == 'https' else 'http'
+                                    if host_hdr:
+                                        full_url = f"{scheme}://{host_hdr}{url}"
+                                    else:
+                                        full_url = url
+                                # Mock the final GET endpoint response after redirect
+                                final_url = f"{scheme}://{host_hdr}/get" if host_hdr else "/get"
+                                resp_obj = {
+                                    "args": query_args,
+                                    "headers": dict(hdrs),
+                                    "origin": "127.0.0.1",
+                                    "url": final_url
+                                }
+                            elif method in ('POST', 'PUT', 'PATCH') and ((('httpbin.org/post' in base_url or '/post' in base_url) or ('httpbin.org/put' in base_url or '/put' in base_url) or ('httpbin.org/patch' in base_url or '/patch' in base_url))):
                                 try:
                                     json_body = json.loads(body.decode('utf-8') or 'null')
                                 except Exception:
                                     json_body = None
-                                resp_obj = {"json": json_body}
-                            elif method == 'DELETE' and ('httpbin.org/delete' in url or '/delete' in url):
-                                resp_obj = {"deleted": True}
+                                
+                                host_hdr = hdrs.get('host', '')
+                                if url.startswith('http://') or url.startswith('https://'):
+                                    full_url = url
+                                else:
+                                    scheme = 'https' if hdrs.get('x-forwarded-proto', '').lower() == 'https' else 'http'
+                                    if host_hdr:
+                                        full_url = f"{scheme}://{host_hdr}{url}"
+                                    else:
+                                        full_url = url
+                                
+                                resp_obj = {
+                                    "args": query_args,
+                                    "data": body.decode('utf-8') if body else "",
+                                    "files": {},
+                                    "form": {},
+                                    "headers": dict(hdrs),
+                                    "json": json_body,
+                                    "origin": "127.0.0.1",
+                                    "url": full_url
+                                }
+                            elif method == 'DELETE' and ('httpbin.org/delete' in base_url or '/delete' in base_url):
+                                host_hdr = hdrs.get('host', '')
+                                if url.startswith('http://') or url.startswith('https://'):
+                                    full_url = url
+                                else:
+                                    scheme = 'https' if hdrs.get('x-forwarded-proto', '').lower() == 'https' else 'http'
+                                    if host_hdr:
+                                        full_url = f"{scheme}://{host_hdr}{url}"
+                                    else:
+                                        full_url = url
+                                
+                                resp_obj = {
+                                    "args": query_args,
+                                    "data": "",
+                                    "files": {},
+                                    "form": {},
+                                    "headers": dict(hdrs),
+                                    "json": None,
+                                    "origin": "127.0.0.1",
+                                    "url": full_url
+                                }
+                            elif method == 'GET' and ('/delay/' in base_url or 'httpbin.org/delay/' in base_url):
+                                host_hdr = hdrs.get('host', '')
+                                scheme = 'https' if hdrs.get('x-forwarded-proto', '').lower() == 'https' else 'http'
+                                try:
+                                    delay_str = base_url.rsplit('/', 1)[-1]
+                                    delay = float(delay_str)
+                                except Exception:
+                                    delay = 1.0
+                                time.sleep(min(max(delay, 0.0), 15.0))
+                                if url.startswith('http://') or url.startswith('https://'):
+                                    full_url = url
+                                else:
+                                    if host_hdr:
+                                        full_url = f"{scheme}://{host_hdr}{url}"
+                                    else:
+                                        full_url = url
+                                resp_obj = {
+                                    "args": query_args,
+                                    "headers": dict(hdrs),
+                                    "origin": "127.0.0.1",
+                                    "url": full_url
+                                }
 
                             # If status_code is 429, send that
                             if status_code == 429:
@@ -381,6 +523,11 @@ class MockSocks5Server:
         with self.lock:
             return max(self.connection_count, self.requests_count)
             
+    def get_request_count(self) -> int:
+        """Возвращает количество успешно обработанных HTTP запросов"""
+        with self.lock:
+            return self.requests_count
+            
     def get_connections_log(self) -> List[Dict]:
         """Возвращает лог подключений"""
         with self.lock:
@@ -425,14 +572,18 @@ class MockSocks5ServerManager:
         """Возвращает общее количество подключений по всем серверам"""
         return sum(server.get_connection_count() for server in self.servers)
         
+    def get_total_requests(self) -> int:
+        """Возвращает общее количество HTTP запросов по всем серверам"""
+        return sum(server.get_request_count() for server in self.servers)
+        
     def get_server_stats(self) -> Dict[int, int]:
-        """Возвращает статистику по каждому серверу"""
+        """Возвращает статистику по каждому серверу (только HTTP запросы)"""
         stats = {}
         for server in self.servers:
             if server.port in self.stopped_ports:
                 stats[server.port] = 0
             else:
-                stats[server.port] = server.get_connection_count()
+                stats[server.port] = server.get_request_count()
         # For stopped servers that are not in self.servers anymore
         for port in self.stopped_ports:
             if port not in stats:

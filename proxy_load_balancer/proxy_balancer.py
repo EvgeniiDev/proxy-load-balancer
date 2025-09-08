@@ -1,14 +1,14 @@
 import time
-import logging
 import threading
 import concurrent.futures
 from typing import Dict, List, Any, Optional
+import collections
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .proxy_stats import ProxyStats
-from .utils import ProxyManager
+from .base import ProxyHandler, ConfigValidator, Logger
 from .proxy_selector_algo import LoadBalancingAlgorithm, AlgorithmFactory
 from .stats_reporter import StatsReporter
 from .http_proxy import HTTPProxy
@@ -16,40 +16,57 @@ from .http_proxy import HTTPProxy
 
 class ProxyBalancer:
     def __init__(self, config: Dict[str, Any], verbose: bool = False) -> None:
+        self.logger = Logger.get_logger("proxy_balancer")
         self.config = config
         self.verbose = verbose
-        self.available_proxies: List[Dict[str, Any]] = config.get("proxies", [])
+        # Throttle state for opportunistic probes on the hot path
+        self._last_unavail_probe_ts = 0.0
+        self._initialize_proxy_lists()
+        self._initialize_stats()
+        self._initialize_sync_objects()
+        self._initialize_components()
+
+    def _initialize_proxy_lists(self):
+        """Инициализация списков прокси."""
+        self.available_proxies: List[Dict[str, Any]] = self.config.get("proxies", [])
         self.unavailable_proxies: List[Dict[str, Any]] = []
         self.resting_proxies: Dict[str, Dict[str, Any]] = {}
+
+    def _initialize_stats(self):
+        """Инициализация статистики."""
         self.proxy_stats: Dict[str, ProxyStats] = {}
         self.max_session_pool_size = 5
+        self.health_failures = {}
+
+    def _initialize_sync_objects(self):
+        """Инициализация объектов синхронизации."""
         self.stats_lock = threading.Lock()
         self.proxy_selection_lock = threading.Lock()
+        self.health_check_stop_event = threading.Event()
+    # Queue of proxies restored by background health checks to be used immediately
+
+    def _initialize_components(self):
+        """Инициализация компонентов."""
         self.server = None
         self.http_proxy = None
-        self.health_check_stop_event = threading.Event()
         self.health_check_thread = None
         self.stats_thread = None
-        self.logger = logging.getLogger("proxy_balancer")
-        self._setup_logger()
+        
         self.stats_reporter = StatsReporter(self)
-        algorithm_name = config.get("load_balancing_algorithm", "random")
+        self._setup_load_balancer()
+        self.http_proxy = HTTPProxy(self.config, self)
+
+    def _setup_load_balancer(self):
+        """Настройка алгоритма балансировки."""
+        algorithm_name = ConfigValidator.get_config_value(
+            self.config, "load_balancing_algorithm", "random"
+        )
         try:
             self.load_balancer = AlgorithmFactory.create_algorithm(algorithm_name)
         except ValueError as e:
             self.logger.error(f"Algorithm initialization error: {e}")
             self.logger.info("Using default algorithm: random")
             self.load_balancer = AlgorithmFactory.create_algorithm("random")
-        
-        self.http_proxy = HTTPProxy(config, self)
-
-    def _setup_logger(self):
-        self.logger.setLevel(logging.INFO)
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
 
     def get_raw_stats(self) -> Dict[str, Any]:
         return {
@@ -73,34 +90,52 @@ class ProxyBalancer:
         self.stats_reporter.log_stats_summary()
 
     def update_proxies(self, new_config: Dict[str, Any]):
+        """Обновление списка прокси из новой конфигурации."""
         self.config = new_config
         new_proxies = new_config.get("proxies", [])
-        new_proxy_keys = set(ProxyManager.get_proxy_key(proxy) for proxy in new_proxies)
+        new_proxy_keys = set(ProxyHandler.get_proxy_key(proxy) for proxy in new_proxies)
 
         self.logger.warning(f"Updated proxies before add: {len(self.available_proxies)}")
 
         with self.proxy_selection_lock:
             self.available_proxies = new_proxies
-            self.unavailable_proxies = []
-            
-            # Очистка отдыхающих прокси, которых больше нет в конфигурации
-            resting_keys_to_remove = []
-            for key in self.resting_proxies:
-                if key not in new_proxy_keys:
-                    resting_keys_to_remove.append(key)
-            
-            for key in resting_keys_to_remove:
-                del self.resting_proxies[key]
+            # Drop unavailable proxies that are not in new config
+            self.unavailable_proxies = [
+                p for p in self.unavailable_proxies
+                if ProxyHandler.get_proxy_key(p) in new_proxy_keys
+            ]
+            self._cleanup_resting_proxies(new_proxy_keys)
+            try:
+                if hasattr(self, 'load_balancer') and self.load_balancer:
+                    self.load_balancer.reset()
+            except Exception:
+                pass
 
         self._cleanup_old_proxy_data(new_proxy_keys)
-
         self.logger.warning(f"Updated proxies after add: {len(self.available_proxies)}")
+
+    def _cleanup_resting_proxies(self, current_proxy_keys: set):
+        """Очистка отдыхающих прокси, которых больше нет в конфигурации."""
+        resting_keys_to_remove = [
+            key for key in self.resting_proxies 
+            if key not in current_proxy_keys
+        ]
+        
+        for key in resting_keys_to_remove:
+            del self.resting_proxies[key]
 
 
     def reload_algorithm(self):
-        algorithm_name = self.config.get("load_balancing_algorithm", "random")
+        """Перезагрузка алгоритма балансировки."""
+        algorithm_name = ConfigValidator.get_config_value(
+            self.config, "load_balancing_algorithm", "random"
+        )
         try:
+            old_algorithm = self.load_balancer
             self.load_balancer = AlgorithmFactory.create_algorithm(algorithm_name)
+            # Сброс состояния старого алгоритма
+            if old_algorithm:
+                old_algorithm.reset()
         except ValueError:
             self.logger.error(f"Unknown algorithm: {algorithm_name}, using random")
             self.load_balancer = AlgorithmFactory.create_algorithm("random")
@@ -150,7 +185,7 @@ class ProxyBalancer:
             return
             
         proxies_to_check = list(self.unavailable_proxies)
-        self.logger.debug(f"Quick health check for {len(proxies_to_check)} unavailable proxies")
+        self.logger.info(f"Quick health check for {len(proxies_to_check)} unavailable proxies")
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(proxies_to_check), 10)) as executor:
             future_to_proxy = {
@@ -162,10 +197,14 @@ class ProxyBalancer:
                 proxy = future_to_proxy[future]
                 try:
                     is_healthy = future.result()
+                    key = ProxyHandler.get_proxy_key(proxy)
                     if is_healthy:
+                        self.logger.info(f"Health check: proxy {key} is healthy; restoring")
                         self._restore_proxy(proxy)
+                    else:
+                        self.logger.info(f"Health check: proxy {key} still unhealthy")
                 except Exception as e:
-                    self.logger.debug(f"Health check failed for {ProxyManager.get_proxy_key(proxy)}: {e}")
+                    self.logger.debug(f"Health check failed for {ProxyHandler.get_proxy_key(proxy)}: {e}")
 
     def _check_all_proxies(self):
         all_proxies = self.available_proxies + self.unavailable_proxies
@@ -182,20 +221,19 @@ class ProxyBalancer:
             
             for future in concurrent.futures.as_completed(future_to_proxy, timeout=30):
                 proxy = future_to_proxy[future]
-                proxy_key = ProxyManager.get_proxy_key(proxy)
-                try:
-                    is_healthy = future.result()
-                    if is_healthy:
-                        if proxy in self.unavailable_proxies:
-                            self._restore_proxy(proxy)
-                    else:
-                        if proxy in self.available_proxies:
-                            self.logger.warning(f"Proxy {proxy_key} failed health check")
-                            self._mark_proxy_unhealthy(proxy)
-                except Exception as e:
-                    self.logger.debug(f"Health check failed for {proxy_key}: {e}")
-                    if proxy in self.available_proxies:
-                        self._mark_proxy_unhealthy(proxy)
+                key = ProxyHandler.get_proxy_key(proxy)
+                with self.proxy_selection_lock:
+                    if proxy in self.unavailable_proxies:
+                        self.unavailable_proxies.remove(proxy)
+                    if proxy not in self.available_proxies:
+                        self.available_proxies.append(proxy)
+                        self.logger.info(f"Proxy {key} restored to available pool")
+                        if hasattr(self, 'load_balancer') and self.load_balancer:
+                            self.load_balancer.reset()
+                with self.stats_lock:
+                    stats = self._get_or_create_proxy_stats(key)
+                    stats.failure_count = 0
+                    self.health_failures[key] = 0
 
     def _test_proxy_health(self, proxy: Dict[str, Any]) -> bool:
         """Treat proxy as healthy if TCP connection to SOCKS server succeeds.
@@ -208,20 +246,30 @@ class ProxyBalancer:
         except Exception:
             return False
 
+    def _quick_test_proxy_health(self, proxy: Dict[str, Any], timeout: float = 1.0) -> bool:
+        """Very fast health probe used inline on request path to speed up recovery."""
+        import socket
+        try:
+            with socket.create_connection((proxy["host"], int(proxy["port"])), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
     def _restore_proxy(self, proxy: Dict[str, Any]):
-        key = ProxyManager.get_proxy_key(proxy)
-        
+        """Восстановление прокси в пул доступных."""
+        key = ProxyHandler.get_proxy_key(proxy)
         with self.proxy_selection_lock:
             if proxy in self.unavailable_proxies:
                 self.unavailable_proxies.remove(proxy)
-            
             if proxy not in self.available_proxies:
-                self.available_proxies.append(proxy)
+                self.available_proxies.insert(0, proxy)
                 self.logger.info(f"Proxy {key} restored to available pool")
-                
+                if hasattr(self, 'load_balancer') and self.load_balancer:
+                    self.load_balancer.reset()
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.failure_count = 0
+            self.health_failures[key] = 0
 
     def _check_resting_proxies(self):
         """Проверяет отдыхающие прокси и восстанавливает их при готовности"""
@@ -246,7 +294,7 @@ class ProxyBalancer:
                     del self.resting_proxies[key]
 
     def _mark_proxy_unhealthy(self, proxy: Dict[str, Any]):
-        key = ProxyManager.get_proxy_key(proxy)
+        key = ProxyHandler.get_proxy_key(proxy)
         
         with self.proxy_selection_lock:
             if proxy in self.available_proxies:
@@ -255,7 +303,9 @@ class ProxyBalancer:
             if proxy not in self.unavailable_proxies:
                 self.unavailable_proxies.append(proxy)
                 self.logger.warning(f"Proxy {key} marked as unhealthy via health check")
-
+        with self.stats_lock:
+            # Keep tracking from zero after marking
+            self.health_failures[key] = 0
     def _run_initial_health_check(self):
         proxies = self.config.get("proxies", [])
         for proxy in proxies:
@@ -283,12 +333,46 @@ class ProxyBalancer:
         with self.proxy_selection_lock:
             proxy = self.load_balancer.select_proxy(self.available_proxies)
             if proxy:
-                key = ProxyManager.get_proxy_key(proxy)
+                key = ProxyHandler.get_proxy_key(proxy)
+                self.logger.debug(f"Selected proxy {key}")
+            return proxy
+        if to_check and (now - self._last_unavail_probe_ts) >= 0.2:
+            restored_any = False
+            for p in to_check:
+                try:
+                    if self._quick_test_proxy_health(p, timeout=0.5):
+                        # This will acquire the selection lock internally in a safe way
+                        self._restore_proxy(p)
+                        restored_any = True
+                except Exception:
+                    # Ignore any probing errors
+                    pass
+            self._last_unavail_probe_ts = now
+
+        # If any unavailable proxy just became healthy, restore and use it immediately
+        if to_check:
+            for p in to_check:
+                try:
+                    if self._quick_test_proxy_health(p, timeout=1.0):
+                        # Log and immediately return this freshly restored proxy
+                        key = ProxyHandler.get_proxy_key(p)
+                        self.logger.info(f"Quick-restore detected for proxy {key}; returning it immediately")
+                        self._restore_proxy(p)
+                        return p
+                except Exception:
+                    pass
+
+        # Now select a proxy under lock
+        with self.proxy_selection_lock:
+            proxy = self.load_balancer.select_proxy(self.available_proxies)
+            if proxy:
+                key = ProxyHandler.get_proxy_key(proxy)
                 self.logger.debug(f"Selected proxy {key}")
             return proxy
 
     def get_session(self, proxy: Dict[str, Any]) -> requests.Session:
-        key = ProxyManager.get_proxy_key(proxy)
+        """Получение HTTP сессии для прокси."""
+        key = ProxyHandler.get_proxy_key(proxy)
         
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
@@ -297,60 +381,93 @@ class ProxyBalancer:
             if session:
                 return session
             
-            session = requests.Session()
-            session.proxies = {
-                "http": f"socks5://{proxy['host']}:{proxy['port']}",
-                "https": f"socks5://{proxy['host']}:{proxy['port']}"
-            }
-            
-            session.headers.update({
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            })
-            
-            adapter = HTTPAdapter(
-                max_retries=Retry(total=0),
-                pool_connections=10,
-                pool_maxsize=20
-            )
-            session.mount("http://", adapter)
-            session.mount("https://", adapter)
-            return session
+            return self._create_new_session(proxy, stats)
+
+    def _create_new_session(self, proxy: Dict[str, Any], stats: ProxyStats) -> requests.Session:
+        """Создание новой HTTP сессии для прокси."""
+        session = requests.Session()
+        
+        # Настройка прокси
+        proxy_url = ProxyHandler.create_proxy_url(proxy)
+        session.proxies = {
+            "http": proxy_url,
+            "https": proxy_url
+        }
+        
+        # Настройка заголовков
+        session.headers.update(self._get_default_headers())
+        
+        # Настройка адаптера
+        adapter = self._create_http_adapter()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        return session
+
+    def _get_default_headers(self) -> Dict[str, str]:
+        """Получение стандартных заголовков для HTTP запросов."""
+        return {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+
+    def _create_http_adapter(self) -> HTTPAdapter:
+        """Создание HTTP адаптера с настройками."""
+        return HTTPAdapter(
+            max_retries=Retry(total=0),
+            pool_connections=10,
+            pool_maxsize=20
+        )
 
     def return_session(self, proxy: Dict[str, Any], session: requests.Session):
-        key = ProxyManager.get_proxy_key(proxy)
+        key = ProxyHandler.get_proxy_key(proxy)
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.add_session(session, self.max_session_pool_size)
 
     def mark_success(self, proxy: Dict[str, Any]):
-        key = ProxyManager.get_proxy_key(proxy)
+        """Отметка успешного выполнения запроса через прокси."""
+        key = ProxyHandler.get_proxy_key(proxy)
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.increment_requests()
             stats.increment_successes()
             stats.increment_200()
             stats.reset_overload_count()
-        self._restore_proxy(proxy)
+        
+        # Восстанавливаем прокси только если он не в available
+        with self.proxy_selection_lock:
+            if proxy not in self.available_proxies:
+                self._restore_proxy(proxy)
+        
         self.logger.debug(f"Proxy {key} success (total: {stats.success_count})")
 
     def mark_failure(self, proxy: Dict[str, Any]):
-        key = ProxyManager.get_proxy_key(proxy)
+        """Отметка неудачного выполнения запроса через прокси."""
+        key = ProxyHandler.get_proxy_key(proxy)
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
-            stats.increment_requests()  # Failure - это тоже запрос!
+            stats.increment_requests()
             stats.increment_failures()
             stats.increment_other()
             failure_count = stats.failure_count
         
         self.logger.warning(f"Proxy {key} failed (failure #{failure_count})")
+        self._handle_proxy_failure(proxy, key, failure_count)
+
+    def _handle_proxy_failure(self, proxy: Dict[str, Any], key: str, failure_count: int):
+        """Обработка неудачи прокси."""
+        max_retries = ConfigValidator.get_config_value(self.config, "max_retries", 3)
         
-        if failure_count >= self.config.get("max_retries", 3):
+        if failure_count >= max_retries:
             with self.proxy_selection_lock:
-                self.available_proxies = [p for p in self.available_proxies if ProxyManager.get_proxy_key(p) != key]
+                self.available_proxies = [
+                    p for p in self.available_proxies 
+                    if ProxyHandler.get_proxy_key(p) != key
+                ]
                 
                 if proxy not in self.unavailable_proxies:
                     self.unavailable_proxies.append(proxy)
@@ -358,35 +475,45 @@ class ProxyBalancer:
                 self.logger.error(f"Proxy {key} marked as unavailable after {failure_count} failures")
 
     def mark_overloaded(self, proxy: Dict[str, Any]):
-        """Mark proxy as overloaded and put it to rest for a backoff period."""
-        key = ProxyManager.get_proxy_key(proxy)
+        """Отметка перегруженного прокси с переводом в режим отдыха."""
+        key = ProxyHandler.get_proxy_key(proxy)
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
             stats.increment_overloads()
             overload_count = stats.overload_count
-        base_rest_duration = float(self.config.get("overload_backoff_base_secs", 30))
-        rest_duration = base_rest_duration * max(1, overload_count)
+            
+        self._put_proxy_to_rest(proxy, key, overload_count, "overloaded")
+
+    def _put_proxy_to_rest(self, proxy: Dict[str, Any], key: str, overload_count: int, reason: str):
+        """Перевод прокси в режим отдыха."""
+        base_rest_duration = ConfigValidator.get_config_value(
+            self.config, "overload_backoff_base_secs", 30
+        )
+        rest_duration = float(base_rest_duration) * max(1, overload_count)
         rest_until = time.time() + rest_duration
+        
         with self.proxy_selection_lock:
             if proxy in self.available_proxies:
                 self.available_proxies.remove(proxy)
+            
             self.resting_proxies[key] = {
                 "proxy": proxy,
                 "rest_until": rest_until,
                 "overload_count": overload_count,
-                "reason": "overloaded",
+                "reason": reason,
             }
+            
         self.logger.warning(
-            f"Proxy {key} overloaded (#{overload_count}), resting for {rest_duration}s"
+            f"Proxy {key} {reason} (#{overload_count}), resting for {rest_duration}s"
         )
 
     def mark_429_response(self, proxy: Dict[str, Any]):
-        """Mark that proxy returned 429 response."""
-        key = ProxyManager.get_proxy_key(proxy)
+        """Отметка ответа 429 от прокси."""
+        key = ProxyHandler.get_proxy_key(proxy)
         with self.stats_lock:
             stats = self._get_or_create_proxy_stats(key)
-            stats.increment_requests()  # 429 - это тоже запрос!
-            stats.increment_failures()  # 429 - это failure
+            stats.increment_requests()
+            stats.increment_failures()
             stats.increment_429()
 
         

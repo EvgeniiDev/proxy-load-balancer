@@ -1,9 +1,9 @@
 import time
-import logging
 import threading
 import collections
 from typing import Dict, List, Any, Deque, TYPE_CHECKING
-from .utils import ProxyManager
+
+from .base import ProxyHandler, Logger
 
 if TYPE_CHECKING:
     from .proxy_balancer import ProxyBalancer
@@ -11,8 +11,8 @@ if TYPE_CHECKING:
 
 class StatsReporter:
     def __init__(self, proxy_balancer: 'ProxyBalancer', max_history: int = 100):
+        self.logger = Logger.get_logger("stats_reporter")
         self.proxy_balancer = proxy_balancer
-        self.logger = logging.getLogger("stats_reporter")
         
         # Monitoring functionality
         self.is_monitoring = False
@@ -24,18 +24,16 @@ class StatsReporter:
         self.max_proxy_stats = 1000
         self.cleanup_interval = 300
         self.last_cleanup_time = time.time()
-        
-        self._setup_logger()
     
     def _is_problematic_proxy(self, proxy_stats: Dict[str, Any]) -> bool:
         """
-        Determine if a proxy has problems and should be displayed in stats.
+        Определение проблемного прокси для отображения в статистике.
         
         Args:
-            proxy_stats: Proxy statistics dictionary
+            proxy_stats: Словарь статистики прокси
             
         Returns:
-            True if proxy has problems, False otherwise
+            True если прокси имеет проблемы, False иначе
         """
         if proxy_stats['status'] in ['unavailable', 'resting']:
             return True
@@ -45,9 +43,6 @@ class StatsReporter:
             if proxy_stats['success_rate'] < 50.0:
                 return True
         return False
-
-    def _setup_logger(self):
-        self.logger.setLevel(logging.INFO)
         if not self.logger.handlers:
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             console = logging.StreamHandler()
@@ -71,7 +66,7 @@ class StatsReporter:
             proxy_stats = {}
 
             for key, stats in self.proxy_balancer.proxy_stats.items():
-                status = "available" if any(ProxyManager.get_proxy_key(p) == key for p in self.proxy_balancer.available_proxies) else ("resting" if key in self.proxy_balancer.resting_proxies else "unavailable")
+                status = "available" if any(ProxyHandler.get_proxy_key(p) == key for p in self.proxy_balancer.available_proxies) else ("resting" if key in self.proxy_balancer.resting_proxies else "unavailable")
                 ps = {
                     "requests": stats.request_count,
                     "successes": stats.success_count,
@@ -91,7 +86,7 @@ class StatsReporter:
                 total_429 += stats.total_429
 
             for proxy in self.proxy_balancer.available_proxies:
-                key = ProxyManager.get_proxy_key(proxy)
+                key = ProxyHandler.get_proxy_key(proxy)
                 if key not in proxy_stats:
                     proxy_stats[key] = {
                         "requests": 0,
@@ -105,7 +100,7 @@ class StatsReporter:
                     }
 
             for proxy in self.proxy_balancer.unavailable_proxies:
-                key = ProxyManager.get_proxy_key(proxy)
+                key = ProxyHandler.get_proxy_key(proxy)
                 if key not in proxy_stats:
                     proxy_stats[key] = {
                         "requests": 0,
@@ -284,16 +279,16 @@ class StatsReporter:
             available_list = list(self.proxy_balancer.available_proxies)
             unavailable_list = list(self.proxy_balancer.unavailable_proxies)
         all_proxies = available_list + unavailable_list
-        available_keys = set(ProxyManager.get_proxy_key(p) for p in available_list)
+        available_keys = set(ProxyHandler.get_proxy_key(p) for p in available_list)
         with self.proxy_balancer.stats_lock:
             failure_map = {}
             for proxy in all_proxies:
-                key = ProxyManager.get_proxy_key(proxy)
+                key = ProxyHandler.get_proxy_key(proxy)
                 st = self.proxy_balancer.proxy_stats.get(key)
                 failure_map[key] = st.failure_count if st else 0
         proxy_stats = []
         for proxy in all_proxies:
-            proxy_key = ProxyManager.get_proxy_key(proxy)
+            proxy_key = ProxyHandler.get_proxy_key(proxy)
             is_available = proxy_key in available_keys
             failures = failure_map.get(proxy_key, 0)
             proxy_info = {
@@ -369,13 +364,13 @@ class StatsReporter:
             resting_proxies = [info["proxy"] for info in self.proxy_balancer.resting_proxies.values()]
             all_proxies.extend(resting_proxies)
             
-            proxy_exists = any(ProxyManager.get_proxy_key(p) == proxy_key for p in all_proxies)
+            proxy_exists = any(ProxyHandler.get_proxy_key(p) == proxy_key for p in all_proxies)
             
             if not proxy_exists:
                 return {"error": f"Proxy '{proxy_key}' not found"}
             
             # Determine proxy status
-            is_available = any(ProxyManager.get_proxy_key(p) == proxy_key for p in self.proxy_balancer.available_proxies)
+            is_available = any(ProxyHandler.get_proxy_key(p) == proxy_key for p in self.proxy_balancer.available_proxies)
             is_resting = proxy_key in self.proxy_balancer.resting_proxies
             
             if is_resting:
@@ -427,7 +422,7 @@ class StatsReporter:
             seen = set()
             unique_keys = []
             for proxy in all_proxies:
-                key = ProxyManager.get_proxy_key(proxy)
+                key = ProxyHandler.get_proxy_key(proxy)
                 if key not in seen:
                     seen.add(key)
                     unique_keys.append(key)

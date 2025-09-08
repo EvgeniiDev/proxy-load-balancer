@@ -1,8 +1,7 @@
 from .proxy_balancer import ProxyBalancer
-from .balancer import Balancer
 from .proxy_stats import ProxyStats
 from .stats_reporter import StatsReporter
-from .utils import ProxyManager
+from .base import ProxyHandler, ConfigValidator, Logger
 from .config import ConfigManager
 import threading
 
@@ -30,4 +29,4 @@ def run_balancer_daemon(config_file: str = "config.json", verbose: bool = False)
         config_manager.stop_monitoring()
         balancer.stop()
 
-__all__ = ["ProxyBalancer", "ProxyManager", "StatsReporter", "run_balancer_daemon"]
+__all__ = ["ProxyBalancer", "StatsReporter", "run_balancer_daemon"]
