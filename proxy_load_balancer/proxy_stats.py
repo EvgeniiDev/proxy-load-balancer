@@ -1,5 +1,7 @@
 from typing import List, Optional
 import requests
+import threading
+from collections import deque
 
 
 class ProxyStats:
@@ -14,7 +16,8 @@ class ProxyStats:
         self.responses_200 = 0
         self.responses_429 = 0
         self.responses_other = 0
-        self.session_pool = []
+        self.session_pool = deque(maxlen=20)
+        self._lock = threading.RLock()
 
     def increment_requests(self):
         self.request_count += 1
@@ -51,20 +54,23 @@ class ProxyStats:
             return 0.0
         return (self.success_count / self.request_count) * 100
     
-    def add_session(self, session: requests.Session, max_pool_size: int = 5):
-        if len(self.session_pool) < max_pool_size:
-            self.session_pool.append(session)
-            return True
-        else:
-            session.close()
-            return False
+    def add_session(self, session: requests.Session, max_pool_size: int = 20):
+        with self._lock:
+            if len(self.session_pool) < max_pool_size:
+                self.session_pool.append(session)
+                return True
+            else:
+                session.close()
+                return False
     
     def get_session(self) -> Optional[requests.Session]:
-        if self.session_pool:
-            return self.session_pool.pop()
-        return None
+        with self._lock:
+            if self.session_pool:
+                return self.session_pool.popleft()
+            return None
     
     def close_all_sessions(self):
-        for session in self.session_pool:
-            session.close()
-        self.session_pool.clear()
+        with self._lock:
+            while self.session_pool:
+                session = self.session_pool.popleft()
+                session.close()

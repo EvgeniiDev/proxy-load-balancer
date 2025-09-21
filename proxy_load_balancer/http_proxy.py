@@ -35,8 +35,9 @@ class HTTPProxy:
 
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         self.server_socket.bind((host, port))
-        self.server_socket.listen(5)
+        self.server_socket.listen(512)
 
         self.running = True
         self.logger.info(f"HTTP Proxy listening on {host}:{port}")
@@ -107,12 +108,23 @@ class HTTPProxy:
     def _read_line(self, socket: socket.socket) -> Optional[str]:
         try:
             line = b""
-            while b"\r\n" not in line:
-                chunk = socket.recv(1)
-                if not chunk:
+            buffer = socket.recv(4096)
+            if not buffer:
+                return None
+                
+            while b"\r\n" not in line + buffer:
+                line += buffer
+                buffer = socket.recv(4096)
+                if not buffer:
                     return None
-                line += chunk
-            return line.decode('utf-8').strip()
+            
+            combined = line + buffer
+            crlf_pos = combined.find(b"\r\n")
+            if crlf_pos >= 0:
+                result_line = combined[:crlf_pos]
+                return result_line.decode('utf-8').strip()
+                
+            return None
         except:
             return None
 
@@ -384,17 +396,23 @@ class HTTPProxy:
 
     def _read_http_request(self, ssl_socket) -> Optional[Tuple[str, str, Dict[str, str], bytes]]:
         try:
-            request_line = b""
-            while b"\r\n" not in request_line:
-                chunk = ssl_socket.recv(1)
+            buffer = b""
+            
+            while b"\r\n\r\n" not in buffer:
+                chunk = ssl_socket.recv(4096)
                 if not chunk:
                     return None
-                request_line += chunk
+                buffer += chunk
             
-            request_line = request_line.decode('utf-8').strip()
-            if not request_line:
+            header_end = buffer.find(b"\r\n\r\n")
+            headers_data = buffer[:header_end].decode('utf-8')
+            body_start = buffer[header_end + 4:]
+            
+            lines = headers_data.strip().split('\r\n')
+            if not lines:
                 return None
                 
+            request_line = lines[0]
             parts = request_line.split(' ')
             if len(parts) < 3:
                 return None
@@ -402,23 +420,12 @@ class HTTPProxy:
             method, path, version = parts[0], parts[1], parts[2]
             
             headers = {}
-            while True:
-                header_line = b""
-                while b"\r\n" not in header_line:
-                    chunk = ssl_socket.recv(1)
-                    if not chunk:
-                        return None
-                    header_line += chunk
-                
-                header_line = header_line.decode('utf-8').strip()
-                if not header_line:
-                    break
-                    
-                if ':' in header_line:
-                    key, value = header_line.split(':', 1)
+            for line in lines[1:]:
+                if ':' in line:
+                    key, value = line.split(':', 1)
                     headers[key.strip().lower()] = value.strip()
             
-            body = b""
+            body = body_start
             content_length = headers.get('content-length')
             if content_length:
                 content_length = int(content_length)

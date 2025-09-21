@@ -35,7 +35,7 @@ class ProxyBalancer:
     def _initialize_stats(self):
         """Инициализация статистики."""
         self.proxy_stats: Dict[str, ProxyStats] = {}
-        self.max_session_pool_size = 5
+        self.max_session_pool_size = 20
         self.health_failures = {}
 
     def _initialize_sync_objects(self):
@@ -230,10 +230,9 @@ class ProxyBalancer:
                         self.logger.info(f"Proxy {key} restored to available pool")
                         if hasattr(self, 'load_balancer') and self.load_balancer:
                             self.load_balancer.reset()
-                with self.stats_lock:
-                    stats = self._get_or_create_proxy_stats(key)
-                    stats.failure_count = 0
-                    self.health_failures[key] = 0
+                stats = self._get_or_create_proxy_stats(key)
+                stats.failure_count = 0
+                self.health_failures[key] = 0
 
     def _test_proxy_health(self, proxy: Dict[str, Any]) -> bool:
         """Treat proxy as healthy if TCP connection to SOCKS server succeeds.
@@ -266,10 +265,9 @@ class ProxyBalancer:
                 self.logger.info(f"Proxy {key} restored to available pool")
                 if hasattr(self, 'load_balancer') and self.load_balancer:
                     self.load_balancer.reset()
-        with self.stats_lock:
-            stats = self._get_or_create_proxy_stats(key)
-            stats.failure_count = 0
-            self.health_failures[key] = 0
+        stats = self._get_or_create_proxy_stats(key)
+        stats.failure_count = 0
+        self.health_failures[key] = 0
 
     def _check_resting_proxies(self):
         """Проверяет отдыхающие прокси и восстанавливает их при готовности"""
@@ -286,9 +284,8 @@ class ProxyBalancer:
                         self.available_proxies.append(proxy)
                     proxies_to_restore.append(key)
                     self.logger.info(f"Proxy {key} restored from rest period (immediate)")
-                    with self.stats_lock:
-                        stats = self._get_or_create_proxy_stats(key)
-                        stats.failure_count = 0
+                    stats = self._get_or_create_proxy_stats(key)
+                    stats.failure_count = 0
             for key in proxies_to_restore:
                 if key in self.resting_proxies:
                     del self.resting_proxies[key]
@@ -336,52 +333,18 @@ class ProxyBalancer:
                 key = ProxyHandler.get_proxy_key(proxy)
                 self.logger.debug(f"Selected proxy {key}")
             return proxy
-        if to_check and (now - self._last_unavail_probe_ts) >= 0.2:
-            restored_any = False
-            for p in to_check:
-                try:
-                    if self._quick_test_proxy_health(p, timeout=0.5):
-                        # This will acquire the selection lock internally in a safe way
-                        self._restore_proxy(p)
-                        restored_any = True
-                except Exception:
-                    # Ignore any probing errors
-                    pass
-            self._last_unavail_probe_ts = now
-
-        # If any unavailable proxy just became healthy, restore and use it immediately
-        if to_check:
-            for p in to_check:
-                try:
-                    if self._quick_test_proxy_health(p, timeout=1.0):
-                        # Log and immediately return this freshly restored proxy
-                        key = ProxyHandler.get_proxy_key(p)
-                        self.logger.info(f"Quick-restore detected for proxy {key}; returning it immediately")
-                        self._restore_proxy(p)
-                        return p
-                except Exception:
-                    pass
-
-        # Now select a proxy under lock
-        with self.proxy_selection_lock:
-            proxy = self.load_balancer.select_proxy(self.available_proxies)
-            if proxy:
-                key = ProxyHandler.get_proxy_key(proxy)
-                self.logger.debug(f"Selected proxy {key}")
-            return proxy
 
     def get_session(self, proxy: Dict[str, Any]) -> requests.Session:
         """Получение HTTP сессии для прокси."""
         key = ProxyHandler.get_proxy_key(proxy)
         
-        with self.stats_lock:
-            stats = self._get_or_create_proxy_stats(key)
-            session = stats.get_session()
-            
-            if session:
-                return session
-            
-            return self._create_new_session(proxy, stats)
+        stats = self._get_or_create_proxy_stats(key)
+        session = stats.get_session()
+        
+        if session:
+            return session
+        
+        return self._create_new_session(proxy, stats)
 
     def _create_new_session(self, proxy: Dict[str, Any], stats: ProxyStats) -> requests.Session:
         """Создание новой HTTP сессии для прокси."""
@@ -418,25 +381,23 @@ class ProxyBalancer:
         """Создание HTTP адаптера с настройками."""
         return HTTPAdapter(
             max_retries=Retry(total=0),
-            pool_connections=10,
-            pool_maxsize=20
+            pool_connections=50,
+            pool_maxsize=100
         )
 
     def return_session(self, proxy: Dict[str, Any], session: requests.Session):
         key = ProxyHandler.get_proxy_key(proxy)
-        with self.stats_lock:
-            stats = self._get_or_create_proxy_stats(key)
-            stats.add_session(session, self.max_session_pool_size)
+        stats = self._get_or_create_proxy_stats(key)
+        stats.add_session(session, self.max_session_pool_size)
 
     def mark_success(self, proxy: Dict[str, Any]):
         """Отметка успешного выполнения запроса через прокси."""
         key = ProxyHandler.get_proxy_key(proxy)
-        with self.stats_lock:
-            stats = self._get_or_create_proxy_stats(key)
-            stats.increment_requests()
-            stats.increment_successes()
-            stats.increment_200()
-            stats.reset_overload_count()
+        stats = self._get_or_create_proxy_stats(key)
+        stats.increment_requests()
+        stats.increment_successes()
+        stats.increment_200()
+        stats.reset_overload_count()
         
         # Восстанавливаем прокси только если он не в available
         with self.proxy_selection_lock:
@@ -448,12 +409,11 @@ class ProxyBalancer:
     def mark_failure(self, proxy: Dict[str, Any]):
         """Отметка неудачного выполнения запроса через прокси."""
         key = ProxyHandler.get_proxy_key(proxy)
-        with self.stats_lock:
-            stats = self._get_or_create_proxy_stats(key)
-            stats.increment_requests()
-            stats.increment_failures()
-            stats.increment_other()
-            failure_count = stats.failure_count
+        stats = self._get_or_create_proxy_stats(key)
+        stats.increment_requests()
+        stats.increment_failures()
+        stats.increment_other()
+        failure_count = stats.failure_count
         
         self.logger.warning(f"Proxy {key} failed (failure #{failure_count})")
         self._handle_proxy_failure(proxy, key, failure_count)
@@ -477,10 +437,9 @@ class ProxyBalancer:
     def mark_overloaded(self, proxy: Dict[str, Any]):
         """Отметка перегруженного прокси с переводом в режим отдыха."""
         key = ProxyHandler.get_proxy_key(proxy)
-        with self.stats_lock:
-            stats = self._get_or_create_proxy_stats(key)
-            stats.increment_overloads()
-            overload_count = stats.overload_count
+        stats = self._get_or_create_proxy_stats(key)
+        stats.increment_overloads()
+        overload_count = stats.overload_count
             
         self._put_proxy_to_rest(proxy, key, overload_count, "overloaded")
 
@@ -510,11 +469,10 @@ class ProxyBalancer:
     def mark_429_response(self, proxy: Dict[str, Any]):
         """Отметка ответа 429 от прокси."""
         key = ProxyHandler.get_proxy_key(proxy)
-        with self.stats_lock:
-            stats = self._get_or_create_proxy_stats(key)
-            stats.increment_requests()
-            stats.increment_failures()
-            stats.increment_429()
+        stats = self._get_or_create_proxy_stats(key)
+        stats.increment_requests()
+        stats.increment_failures()
+        stats.increment_429()
 
         
 
@@ -545,5 +503,7 @@ class ProxyBalancer:
 
     def _get_or_create_proxy_stats(self, key: str) -> ProxyStats:
         if key not in self.proxy_stats:
-            self.proxy_stats[key] = ProxyStats()
+            with self.stats_lock:
+                if key not in self.proxy_stats:
+                    self.proxy_stats[key] = ProxyStats()
         return self.proxy_stats[key]
