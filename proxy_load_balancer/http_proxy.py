@@ -448,24 +448,31 @@ class HTTPProxy:
         tried = set()
         attempts = 0
 
+        self.logger.info(f"Starting to forward request: {method} {host}:{port}{path}")
+
         while attempts < 20:
             if self.balancer:
                 proxy = self.balancer.get_next_proxy()
+                self.logger.info(f"Got proxy from balancer: {proxy}")
             
             if not proxy:
+                self.logger.warning("No proxy available from balancer")
                 break
 
             key = ProxyHandler.get_proxy_key(proxy)
             if key in tried:
+                self.logger.info(f"Proxy {key} already tried, skipping")
                 break
             
             tried.add(key)
             last_proxy = proxy
 
+            self.logger.info(f"Attempting to send request through proxy {key}")
             response = self._send_request_through_proxy(method, host, port, path, headers, body, proxy)
             
             if response:
                 status_code, response_headers, response_body = response
+                self.logger.info(f"Received response from proxy {key}: status={status_code}")
                 
                 if self.balancer:
                     if status_code == 429:
@@ -484,13 +491,15 @@ class HTTPProxy:
                 return response
             else:
                 if self.balancer:
-                    self.logger.info(f"Forward request failed for proxy {key}")
+                    self.logger.warning(f"Forward request failed for proxy {key}")
                     self.balancer.mark_failure(proxy)
                 attempts += 1
 
         if last_proxy and self.balancer:
+            self.logger.warning(f"All attempts failed, marking last proxy {ProxyHandler.get_proxy_key(last_proxy)} as failed")
             self.balancer.mark_failure(last_proxy)
 
+        self.logger.error(f"Failed to forward request {method} {host}:{port}{path} after {attempts} attempts")
         return None
 
     def _send_request_through_proxy(self, method: str, host: str, port: int, path: str, 
