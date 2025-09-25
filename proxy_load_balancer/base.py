@@ -8,14 +8,14 @@ from typing import Any, Dict
 class Logger:
     """Статический логгер для всех компонентов системы."""
     
-    _logger = None
+    _loggers = {}
     
     @classmethod
     def get_logger(cls, name: str = "proxy_balancer") -> logging.Logger:
         """Получение настроенного логгера."""
-        if cls._logger is None:
-            cls._logger = cls._setup_logger(name)
-        return cls._logger
+        if name not in cls._loggers:
+            cls._loggers[name] = cls._setup_logger(name)
+        return cls._loggers[name]
     
     @classmethod
     def _setup_logger(cls, name: str) -> logging.Logger:
@@ -23,6 +23,7 @@ class Logger:
         logger = logging.getLogger(name)
         logger.setLevel(logging.INFO)
         
+        # Предотвращаем дублирование хендлеров
         if not logger.handlers:
             handler = logging.StreamHandler()
             formatter = logging.Formatter(
@@ -30,6 +31,7 @@ class Logger:
             )
             handler.setFormatter(formatter)
             logger.addHandler(handler)
+            logger.propagate = False  # Предотвращаем передачу в родительские логгеры
             
         return logger
 

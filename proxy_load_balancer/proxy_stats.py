@@ -70,7 +70,7 @@ class ProxyStats:
             return None
     
     def close_all_sessions(self):
-        with self.lock:
+        with self._lock:
             sessions_to_close = list(self.session_pool)
             self.session_pool.clear()
             for session in sessions_to_close:
