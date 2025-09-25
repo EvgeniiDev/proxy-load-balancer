@@ -169,8 +169,16 @@ class HTTPProxy:
                 username=proxy.get("username"),
                 password=proxy.get("password"),
             )
-            sock.settimeout(10)
+            # Оптимизированные таймауты для лучшей производительности
+            sock.settimeout(15)  # Увеличен таймаут подключения
+            
+            # Устанавливаем TCP keepalive для стабильности
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            
             sock.connect((target_host, target_port))
+            
+            # После подключения убираем таймаут для данных
+            sock.settimeout(None)
             return sock
         except Exception as e:
             self.logger.error(f"Error connecting through proxy {proxy['host']}:{proxy['port']}: {e}")
@@ -181,7 +189,8 @@ class HTTPProxy:
             sockets = [client_socket, target_socket]
             
             while True:
-                ready, _, error = select.select(sockets, [], sockets, 60)
+                # Увеличен таймаут select для стабильности
+                ready, _, error = select.select(sockets, [], sockets, 300)
                 
                 if error:
                     break
@@ -196,10 +205,12 @@ class HTTPProxy:
                             return
                         
                         if sock is client_socket:
-                            target_socket.send(data)
+                            target_socket.sendall(data)  # sendall более надежный
                         else:
-                            client_socket.send(data)
-                    except:
+                            client_socket.sendall(data)
+                    except socket.error:
+                        return
+                    except Exception:
                         return
 
         except Exception as e:
@@ -396,6 +407,8 @@ class HTTPProxy:
 
     def _read_http_request(self, ssl_socket) -> Optional[Tuple[str, str, Dict[str, str], bytes]]:
         try:
+            # Устанавливаем увеличенные таймауты для SSL чтения
+            ssl_socket.settimeout(20.0)
             buffer = b""
             
             while b"\r\n\r\n" not in buffer:
@@ -429,6 +442,8 @@ class HTTPProxy:
             content_length = headers.get('content-length')
             if content_length:
                 content_length = int(content_length)
+                # Больше времени для чтения тела запроса
+                ssl_socket.settimeout(30.0)
                 while len(body) < content_length:
                     chunk = ssl_socket.recv(min(4096, content_length - len(body)))
                     if not chunk:
@@ -437,7 +452,9 @@ class HTTPProxy:
             
             return method, path, headers, body
             
-        except Exception as e:
+        except socket.timeout:
+            self.logger.error(f"The read operation timed out")
+            return None
             self.logger.error(f"Error reading HTTP request: {e}")
             return None
 
@@ -504,8 +521,10 @@ class HTTPProxy:
 
     def _send_request_through_proxy(self, method: str, host: str, port: int, path: str, 
                                   headers: Dict[str, str], body: bytes, proxy: Dict[str, Any]) -> Optional[Tuple[int, Dict[str, str], bytes]]:
+        proxy_key = f"{proxy['host']}:{proxy['port']}"
         try:
             import socks
+            self.logger.debug(f"[{proxy_key}] Creating SOCKS5 connection to {host}:{port}")
             sock = socks.socksocket()
             sock.set_proxy(
                 proxy_type=socks.SOCKS5,
@@ -515,15 +534,20 @@ class HTTPProxy:
                 password=proxy.get("password"),
             )
             sock.settimeout(30)
+            self.logger.debug(f"[{proxy_key}] Connecting through SOCKS5 proxy...")
             sock.connect((host, port))
+            self.logger.debug(f"[{proxy_key}] SOCKS5 connection established")
             
             # Only wrap with TLS for real upstream HTTPS. When emulating (X-Forwarded-Proto), keep plaintext.
             if port == 443 and headers.get('x-forwarded-proto', '').lower() != 'https':
+                self.logger.debug(f"[{proxy_key}] Wrapping connection with SSL for {host}:443")
                 context = ssl.create_default_context()
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
                 sock = context.wrap_socket(sock, server_hostname=host)
+                self.logger.debug(f"[{proxy_key}] SSL handshake completed")
             
+            self.logger.debug(f"[{proxy_key}] Sending HTTP request: {method} {path}")
             request_data = f"{method} {path} HTTP/1.1\r\n"
             for key, value in headers.items():
                 request_data += f"{key}: {value}\r\n"
@@ -531,49 +555,91 @@ class HTTPProxy:
             
             sock.send(request_data.encode('utf-8'))
             if body:
+                self.logger.debug(f"[{proxy_key}] Sending {len(body)} bytes of body data")
                 sock.send(body)
             
+            # Set a shorter timeout for reading response
+            self.logger.debug(f"[{proxy_key}] Reading response from server...")
             response_data = b""
+            headers_complete = False
+            
             while True:
-                chunk = sock.recv(4096)
-                if not chunk:
+                try:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response_data += chunk
+                    
+                    if not headers_complete and b"\r\n\r\n" in response_data:
+                        headers_complete = True
+                        header_end = response_data.find(b"\r\n\r\n") + 4
+                        headers_part = response_data[:header_end].decode('utf-8')
+                        body_part = response_data[header_end:]
+                        
+                        lines = headers_part.strip().split('\r\n')
+                        status_line = lines[0]
+                        status_code = int(status_line.split()[1])
+                        self.logger.debug(f"[{proxy_key}] Received status: {status_code} from {status_line}")
+                        
+                        response_headers = {}
+                        for line in lines[1:]:
+                            if ':' in line:
+                                key, value = line.split(':', 1)
+                                response_headers[key.strip().lower()] = value.strip()
+                        
+                        content_length = response_headers.get('content-length')
+                        if content_length:
+                            content_length = int(content_length)
+                            self.logger.debug(f"[{proxy_key}] Content-Length: {content_length}, received body: {len(body_part)} bytes")
+                            # Check if we already have all the body
+                            if len(body_part) >= content_length:
+                                sock.close()
+                                self.logger.debug(f"[{proxy_key}] Complete response received, returning status {status_code}")
+                                return status_code, response_headers, body_part[:content_length]
+                            # Continue reading until we have full body
+                        elif response_headers.get('transfer-encoding') == 'chunked':
+                            # For chunked encoding, we'll read what we can and return
+                            self.logger.debug(f"[{proxy_key}] Chunked response, returning partial data")
+                            sock.close()
+                            return status_code, response_headers, body_part
+                        else:
+                            # No content-length and not chunked, return what we have
+                            self.logger.debug(f"[{proxy_key}] No content-length header, returning partial data")
+                            sock.close()
+                            return status_code, response_headers, body_part
+                            
+                except socket.timeout:
+                    # If we have headers and some body, return what we have
+                    self.logger.warning(f"[{proxy_key}] Socket timeout while reading response")
+                    if headers_complete:
+                        sock.close()
+                        self.logger.debug(f"[{proxy_key}] Returning partial response due to timeout")
+                        return status_code, response_headers, body_part
+                    else:
+                        self.logger.error(f"[{proxy_key}] Timeout before headers complete")
+                        break
+                except Exception as read_error:
+                    self.logger.error(f"[{proxy_key}] Error reading response data: {read_error}")
                     break
-                response_data += chunk
-                
-                if b"\r\n\r\n" in response_data:
-                    header_end = response_data.find(b"\r\n\r\n") + 4
-                    headers_part = response_data[:header_end].decode('utf-8')
-                    body_part = response_data[header_end:]
-                    
-                    lines = headers_part.strip().split('\r\n')
-                    status_line = lines[0]
-                    status_code = int(status_line.split()[1])
-                    
-                    response_headers = {}
-                    for line in lines[1:]:
-                        if ':' in line:
-                            key, value = line.split(':', 1)
-                            response_headers[key.strip().lower()] = value.strip()
-                    
-                    content_length = response_headers.get('content-length')
-                    if content_length:
-                        content_length = int(content_length)
-                        while len(body_part) < content_length:
-                            chunk = sock.recv(min(4096, content_length - len(body_part)))
-                            if not chunk:
-                                break
-                            body_part += chunk
-                    elif response_headers.get('transfer-encoding') == 'chunked':
-                        body_part = self._read_chunked_response(sock, body_part)
-                    
-                    sock.close()
-                    return status_code, response_headers, body_part
             
             sock.close()
+            self.logger.error(f"[{proxy_key}] Failed to get complete response")
             return None
             
+        except socks.ProxyConnectionError as e:
+            self.logger.error(f"[{proxy_key}] SOCKS5 proxy connection error: {e}")
+            return None
+        except socks.GeneralProxyError as e:
+            self.logger.error(f"[{proxy_key}] SOCKS5 general proxy error: {e}")
+            return None
+        except socket.timeout as e:
+            self.logger.error(f"[{proxy_key}] Socket timeout during connection: {e}")
+            return None
+        except ConnectionRefusedError as e:
+            self.logger.error(f"[{proxy_key}] Connection refused: {e}")
+            return None
         except Exception as e:
-            self.logger.error(f"Error sending request through proxy: {e}")
+            self.logger.error(f"[{proxy_key}] Unexpected error sending request through proxy: {e}")
             return None
 
     def _read_chunked_response(self, sock, initial_data: bytes) -> bytes:
@@ -638,17 +704,25 @@ class HTTPProxy:
             
             status_text = "OK" if status_code == 200 else "Error"
             response_line = f"HTTP/1.1 {status_code} {status_text}\r\n"
-            ssl_socket.send(response_line.encode('utf-8'))
+            ssl_socket.sendall(response_line.encode('utf-8'))
             
             for key, value in headers.items():
                 header_line = f"{key}: {value}\r\n"
-                ssl_socket.send(header_line.encode('utf-8'))
+                ssl_socket.sendall(header_line.encode('utf-8'))
             
-            ssl_socket.send(b"\r\n")
+            ssl_socket.sendall(b"\r\n")
             
             if body:
-                ssl_socket.send(body)
-                
+                # Отправляем тело по частям для больших ответов
+                chunk_size = 8192
+                for i in range(0, len(body), chunk_size):
+                    chunk = body[i:i + chunk_size]
+                    ssl_socket.sendall(chunk)
+                    
+        except ssl.SSLError as e:
+            self.logger.debug(f"SSL error sending response: {e}")
+        except socket.timeout:
+            self.logger.debug(f"Timeout sending HTTP response")
         except Exception as e:
             self.logger.error(f"Error sending HTTP response: {e}")
 
