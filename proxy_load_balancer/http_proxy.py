@@ -18,6 +18,8 @@ class HTTPProxy:
         self.running = False
         self.threads = []
         self._setup_ssl_context()
+        self._socket_buffers = {}
+        self._buffer_lock = threading.Lock()
 
     def _setup_ssl_context(self):
         """Настройка SSL контекста."""
@@ -100,33 +102,87 @@ class HTTPProxy:
         except Exception as e:
             self.logger.error(f"Error handling client {addr}: {e}")
         finally:
+            self._clear_socket_buffer(client_socket)
             try:
                 client_socket.close()
             except:
                 pass
 
-    def _read_line(self, socket: socket.socket) -> Optional[str]:
-        try:
-            line = b""
-            buffer = socket.recv(4096)
-            if not buffer:
+    def _buffer_key(self, sock: socket.socket) -> int:
+        return id(sock)
+
+    def _clear_socket_buffer(self, sock: socket.socket):
+        key = self._buffer_key(sock)
+        with self._buffer_lock:
+            self._socket_buffers.pop(key, None)
+
+    def _read_line(self, sock: socket.socket) -> Optional[str]:
+        key = self._buffer_key(sock)
+
+        while True:
+            with self._buffer_lock:
+                buffer = self._socket_buffers.setdefault(key, bytearray())
+                newline_idx = buffer.find(b"\r\n")
+
+                if newline_idx != -1:
+                    line_bytes = buffer[:newline_idx]
+                    del buffer[:newline_idx + 2]
+
+                    if buffer:
+                        self._socket_buffers[key] = buffer
+                    else:
+                        self._socket_buffers.pop(key, None)
+
+                    return line_bytes.decode('utf-8', errors='ignore').strip()
+
+            try:
+                chunk = sock.recv(4096)
+            except Exception:
+                self._clear_socket_buffer(sock)
                 return None
-                
-            while b"\r\n" not in line + buffer:
-                line += buffer
-                buffer = socket.recv(4096)
-                if not buffer:
-                    return None
-            
-            combined = line + buffer
-            crlf_pos = combined.find(b"\r\n")
-            if crlf_pos >= 0:
-                result_line = combined[:crlf_pos]
-                return result_line.decode('utf-8').strip()
-                
-            return None
-        except:
-            return None
+
+            if not chunk:
+                with self._buffer_lock:
+                    buffer = self._socket_buffers.pop(key, None)
+                if buffer:
+                    return bytes(buffer).decode('utf-8', errors='ignore').strip()
+                return None
+
+            with self._buffer_lock:
+                buffer = self._socket_buffers.setdefault(key, bytearray())
+                buffer.extend(chunk)
+
+    def _read_exact(self, sock: socket.socket, length: int) -> bytes:
+        key = self._buffer_key(sock)
+        remaining = length
+        chunks = []
+
+        with self._buffer_lock:
+            buffer = self._socket_buffers.get(key)
+            if buffer:
+                take = buffer[:remaining]
+                if take:
+                    chunks.append(bytes(take))
+                    remaining -= len(take)
+                    del buffer[:len(take)]
+                if buffer:
+                    self._socket_buffers[key] = buffer
+                else:
+                    self._socket_buffers.pop(key, None)
+
+        while remaining > 0:
+            try:
+                chunk = sock.recv(min(65536, remaining))
+            except Exception:
+                break
+
+            if not chunk:
+                break
+
+            chunks.append(chunk)
+            remaining -= len(chunk)
+
+        return b"".join(chunks)
 
     def _handle_connect(self, client_socket: socket.socket, host_port: str, headers: Dict[str, str]):
         start_time = time.time()
@@ -233,11 +289,7 @@ class HTTPProxy:
             if content_length:
                 try:
                     body_length = int(content_length)
-                    while len(body) < body_length:
-                        chunk = client_socket.recv(min(65536, body_length - len(body)))
-                        if not chunk:
-                            break
-                        body += chunk
+                    body = self._read_exact(client_socket, body_length)
                 except Exception:
                     pass
             
@@ -553,15 +605,19 @@ class HTTPProxy:
                 request_data += f"{key}: {value}\r\n"
             request_data += "\r\n"
             
-            sock.send(request_data.encode('utf-8'))
+            sock.sendall(request_data.encode('utf-8'))
             if body:
                 self.logger.debug(f"[{proxy_key}] Sending {len(body)} bytes of body data")
-                sock.send(body)
+                sock.sendall(body)
             
             # Set a shorter timeout for reading response
             self.logger.debug(f"[{proxy_key}] Reading response from server...")
             response_data = b""
             headers_complete = False
+            header_end = None
+            expected_body_length = None
+            status_code = 0
+            response_headers: Dict[str, str] = {}
             
             while True:
                 try:
@@ -573,7 +629,7 @@ class HTTPProxy:
                     if not headers_complete and b"\r\n\r\n" in response_data:
                         headers_complete = True
                         header_end = response_data.find(b"\r\n\r\n") + 4
-                        headers_part = response_data[:header_end].decode('utf-8')
+                        headers_part = response_data[:header_end].decode('utf-8', errors='ignore')
                         body_part = response_data[header_end:]
                         
                         lines = headers_part.strip().split('\r\n')
@@ -587,15 +643,15 @@ class HTTPProxy:
                                 key, value = line.split(':', 1)
                                 response_headers[key.strip().lower()] = value.strip()
                         
-                        content_length = response_headers.get('content-length')
-                        if content_length:
-                            content_length = int(content_length)
-                            self.logger.debug(f"[{proxy_key}] Content-Length: {content_length}, received body: {len(body_part)} bytes")
+                        content_length_header = response_headers.get('content-length')
+                        if content_length_header:
+                            expected_body_length = int(content_length_header)
+                            self.logger.debug(f"[{proxy_key}] Content-Length: {expected_body_length}, received body: {len(body_part)} bytes")
                             # Check if we already have all the body
-                            if len(body_part) >= content_length:
+                            if len(body_part) >= expected_body_length:
                                 sock.close()
                                 self.logger.debug(f"[{proxy_key}] Complete response received, returning status {status_code}")
-                                return status_code, response_headers, body_part[:content_length]
+                                return status_code, response_headers, body_part[:expected_body_length]
                             # Continue reading until we have full body
                         elif response_headers.get('transfer-encoding') == 'chunked':
                             # For chunked encoding, we'll read what we can and return
@@ -607,11 +663,19 @@ class HTTPProxy:
                             self.logger.debug(f"[{proxy_key}] No content-length header, returning partial data")
                             sock.close()
                             return status_code, response_headers, body_part
+
+                    if headers_complete and expected_body_length is not None and header_end is not None:
+                        body_part = response_data[header_end:]
+                        if len(body_part) >= expected_body_length:
+                            sock.close()
+                            self.logger.debug(f"[{proxy_key}] Complete response received after additional reads, returning status {status_code}")
+                            return status_code, response_headers, body_part[:expected_body_length]
                             
                 except socket.timeout:
                     # If we have headers and some body, return what we have
                     self.logger.warning(f"[{proxy_key}] Socket timeout while reading response")
                     if headers_complete:
+                        body_part = response_data[header_end:] if header_end is not None else b""
                         sock.close()
                         self.logger.debug(f"[{proxy_key}] Returning partial response due to timeout")
                         return status_code, response_headers, body_part
