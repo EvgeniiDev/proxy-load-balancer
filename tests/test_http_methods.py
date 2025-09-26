@@ -284,6 +284,24 @@ class TestHttpMethods(BaseLoadBalancerTest):
         stats = self.server_manager.get_server_stats()
         self.assertEqual(stats.get(self.server.port, 0), 5)
 
+    def test_chunked_response_handling(self):
+        """Проверяет корректную обработку chunked-ответов"""
+        chunks = [b"Hello ", b"chunked ", b"world!"]
+        self.server_manager.set_chunked_response(self.server.port, chunks)
+        try:
+            response = self.make_request_through_proxy(
+                balancer_port=self.balancer_port,
+                target_url="http://httpbin.org/get?chunked=true",
+                method="GET"
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn('Transfer-Encoding', response.headers)
+            self.assertIn('Content-Length', response.headers)
+            self.assertEqual(response.text, "Hello chunked world!")
+        finally:
+            self.server_manager.set_chunked_response(self.server.port, None)
+
 
 if __name__ == '__main__':
     unittest.main()

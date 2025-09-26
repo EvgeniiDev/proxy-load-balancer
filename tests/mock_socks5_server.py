@@ -24,6 +24,7 @@ class MockSocks5Server:
         self.server_manager = None
         self.should_fail = False
         self.fixed_response_code = None
+        self.chunked_response = None
     
     def start(self):
         """Запускает mock SOCKS5 сервер"""
@@ -151,6 +152,39 @@ class MockSocks5Server:
     def _proxy_data(self, client_socket: socket.socket, connection_data: bytes) -> bool:
         """Проксирует данные к реальному серверу. Возвращает True при успехе."""
         try:
+            if self.chunked_response is not None:
+                try:
+                    client_socket.settimeout(5.0)
+                    buffer = b""
+                    while b"\r\n\r\n" not in buffer:
+                        chunk = client_socket.recv(4096)
+                        if not chunk:
+                            break
+                        buffer += chunk
+
+                    headers = [
+                        b"HTTP/1.1 200 OK\r\n",
+                        b"Content-Type: text/plain; charset=utf-8\r\n",
+                        b"Transfer-Encoding: chunked\r\n",
+                        b"Connection: keep-alive\r\n",
+                        b"\r\n",
+                    ]
+                    for header in headers:
+                        client_socket.sendall(header)
+
+                    for part in self.chunked_response:
+                        chunk_bytes = part if isinstance(part, bytes) else str(part).encode('utf-8')
+                        size_line = f"{len(chunk_bytes):X}\r\n".encode('utf-8')
+                        client_socket.sendall(size_line)
+                        if chunk_bytes:
+                            client_socket.sendall(chunk_bytes)
+                        client_socket.sendall(b"\r\n")
+
+                    client_socket.sendall(b"0\r\n\r\n")
+                    return True
+                except Exception:
+                    return False
+
             if self.fixed_response_code is not None:
                 try:
                     client_socket.settimeout(5.0)
@@ -609,6 +643,13 @@ class MockSocks5ServerManager:
                 server.fixed_response_code = mapping[server.port]
             else:
                 server.fixed_response_code = None
+
+    def set_chunked_response(self, port: int, chunks: Optional[List[bytes]]):
+        """Настраивает сервер на возврат chunked-ответа"""
+        for server in self.servers:
+            if server.port == port:
+                server.chunked_response = chunks
+                break
     
     def stop_server(self, port: int):
         """Останавливает сервер с указанным портом"""
